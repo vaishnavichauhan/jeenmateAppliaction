@@ -1,7 +1,7 @@
 const pool = require('../config/db');
 
 const Conversation = {
-  async findAll({ search } = {}) {
+  async findAll({ search, userId } = {}) {
     let query = `
       SELECT 
         c.id,
@@ -19,6 +19,11 @@ const Conversation = {
       WHERE 1=1
     `;
     const params = [];
+
+    if (userId) {
+      query += ` AND c.user_id = ?`;
+      params.push(userId);
+    }
 
     if (search && search.trim()) {
       query += ` AND (cu.name LIKE ? OR cu.phone_number LIKE ?)`;

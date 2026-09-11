@@ -3,6 +3,7 @@ import {
   View,
   Text,
   FlatList,
+  ScrollView,
   TextInput,
   TouchableOpacity,
   StyleSheet,
@@ -11,10 +12,14 @@ import {
   ActivityIndicator,
   Modal,
   Alert,
+  Keyboard,
+  StatusBar,
 } from 'react-native';
 import { useRoute, useNavigation } from '@react-navigation/native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useChatStore, ChatMessage } from '../../store/chatStore';
-import { useTaskStore } from '../../store/taskStore';
+import { useTaskStore, TeamMember } from '../../store/taskStore';
+import { useAuthStore } from '../../store/authStore';
 import { COLORS, SPACING, RADIUS } from '../../constants/theme';
 import { Icon } from '../../components/common/Icon';
 
@@ -92,6 +97,7 @@ const groupMessagesByDate = (rawMessages: ChatMessage[]): MessageListItem[] => {
 export const ChatDetailScreen: React.FC = () => {
   const route = useRoute<any>();
   const navigation = useNavigation();
+  const insets = useSafeAreaInsets();
   const { conversationId, customerName } = route.params || {};
 
   const {
@@ -103,19 +109,62 @@ export const ChatDetailScreen: React.FC = () => {
     isLoading,
   } = useChatStore();
 
-  const { addTask } = useTaskStore();
+  const { addTask, teamMembers, fetchTeamMembers } = useTaskStore();
+  const { user } = useAuthStore();
 
   const [inputMessage, setInputMessage] = useState('');
+  const [isKeyboardVisible, setKeyboardVisible] = useState(false);
   const flatListRef = useRef<FlatList>(null);
+
+  useEffect(() => {
+    const showSub = Keyboard.addListener(
+      Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow',
+      () => setKeyboardVisible(true)
+    );
+    const hideSub = Keyboard.addListener(
+      Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide',
+      () => setKeyboardVisible(false)
+    );
+    return () => {
+      showSub.remove();
+      hideSub.remove();
+    };
+  }, []);
 
   // Quick Task Modal
   const [taskModalVisible, setTaskModalVisible] = useState(false);
   const [taskOriginalMessage, setTaskOriginalMessage] = useState('');
   const [taskStaffNote, setTaskStaffNote] = useState('');
-  const [taskTime, setTaskTime] = useState('10:00 AM');
-  const [taskDueDate, setTaskDueDate] = useState(
-    new Date(Date.now() + 24 * 3600 * 1000).toISOString().split('T')[0]
-  );
+
+  const getTodayDateStr = () => {
+    const now = new Date();
+    const day = String(now.getDate()).padStart(2, '0');
+    const month = String(now.getMonth() + 1).padStart(2, '0');
+    const year = now.getFullYear();
+    return `${day}/${month}/${year}`;
+  };
+
+  const getCurrentTimeStr = () => {
+    const now = new Date();
+    let hours = now.getHours();
+    const minutes = String(now.getMinutes()).padStart(2, '0');
+    const ampm = hours >= 12 ? 'pm' : 'am';
+    hours = hours % 12;
+    hours = hours ? hours : 12;
+    return `${hours}:${minutes} ${ampm}`;
+  };
+
+  const [taskTime, setTaskTime] = useState(getCurrentTimeStr());
+  const [taskDueDate, setTaskDueDate] = useState(getTodayDateStr());
+  const [assignedUser, setAssignedUser] = useState<TeamMember | null>(null);
+
+  const availableAssignMembers = teamMembers.filter((m) => {
+    if (user) {
+      if (user.id && String(m.id) === String(user.id)) return false;
+      if (user.email && m.email && m.email.toLowerCase() === user.email.toLowerCase()) return false;
+    }
+    return true;
+  });
 
   useEffect(() => {
     if (conversationId) {
@@ -143,6 +192,10 @@ export const ChatDetailScreen: React.FC = () => {
   };
 
   const handleOpenCreateTask = (messageText: string) => {
+    fetchTeamMembers();
+    setAssignedUser(null);
+    setTaskDueDate(getTodayDateStr());
+    setTaskTime(getCurrentTimeStr());
     setTaskOriginalMessage(messageText);
     setTaskStaffNote(`Follow up on customer request: "${messageText.slice(0, 40)}..."`);
     setTaskModalVisible(true);
@@ -151,6 +204,7 @@ export const ChatDetailScreen: React.FC = () => {
   const handleSaveTask = async () => {
     const custName = customerName || activeConversation?.customer_name || 'Customer';
     const custPhone = activeConversation?.phone_number || '+910000000000';
+    const combinedDue = taskTime?.trim() ? `${taskDueDate.trim()} ${taskTime.trim()}` : taskDueDate.trim();
 
     await addTask({
       customerId: conversationId,
@@ -158,9 +212,11 @@ export const ChatDetailScreen: React.FC = () => {
       customerPhone: custPhone,
       originalMessage: taskOriginalMessage,
       staffNote: taskStaffNote,
-      dueDate: taskDueDate,
+      dueDate: combinedDue,
+      assignedToUserId: assignedUser ? assignedUser.id : null,
     });
 
+    setAssignedUser(null);
     setTaskModalVisible(false);
     Alert.alert('Task Created 📌', `CRM task added for ${custName}.`);
   };
@@ -226,16 +282,26 @@ export const ChatDetailScreen: React.FC = () => {
     );
   };
 
+  const statusBarHeight = Platform.OS === 'android' ? (StatusBar.currentHeight || 28) : 0;
+  const headerTopPadding = Math.max(insets.top, statusBarHeight) + 10;
+
   return (
     <KeyboardAvoidingView
       style={styles.container}
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 0}
+      keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 0}
     >
+      <StatusBar barStyle="light-content" />
+
       {/* Top Chat Subheader */}
-      <View style={styles.chatSubheader}>
-        <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backBtn}>
-          <Text style={styles.backBtnText}>‹ Back</Text>
+      <View style={[styles.chatSubheader, { paddingTop: headerTopPadding }]}>
+        <TouchableOpacity
+          onPress={() => navigation.goBack()}
+          style={styles.backBtn}
+          hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+          activeOpacity={0.7}
+        >
+          <Icon name="arrow-left" size={22} color={COLORS.bgWhite} strokeWidth={2.5} />
         </TouchableOpacity>
         <View style={styles.headerInfo}>
           <Text style={styles.headerCustomerName} numberOfLines={1}>
@@ -289,7 +355,16 @@ export const ChatDetailScreen: React.FC = () => {
       )}
 
       {/* Bottom Input Box */}
-      <View style={styles.inputContainer}>
+      <View
+        style={[
+          styles.inputContainer,
+          {
+            paddingBottom: isKeyboardVisible
+              ? 10
+              : Math.max(insets.bottom, 12) + 6,
+          },
+        ]}
+      >
         <TextInput
           style={styles.textInput}
           placeholder="Type WhatsApp reply to customer..."
@@ -329,56 +404,101 @@ export const ChatDetailScreen: React.FC = () => {
               </TouchableOpacity>
             </View>
 
-            <View style={styles.formGroup}>
-              <Text style={styles.formLabel}>Customer</Text>
-              <Text style={styles.readOnlyCustomer}>
-                {customerName || activeConversation?.customer_name} (
-                {activeConversation?.phone_number})
-              </Text>
-            </View>
-
-            <View style={styles.formGroup}>
-              <Text style={styles.formLabel}>Original Message</Text>
-              <View style={styles.quoteBoxModal}>
-                <Text style={styles.quoteBoxText}>"{taskOriginalMessage}"</Text>
+            <ScrollView style={{ maxHeight: 460 }} showsVerticalScrollIndicator={false}>
+              <View style={styles.formGroup}>
+                <Text style={styles.formLabel}>Customer</Text>
+                <Text style={styles.readOnlyCustomer}>
+                  {customerName || activeConversation?.customer_name} (
+                  {activeConversation?.phone_number})
+                </Text>
               </View>
-            </View>
 
-            <View style={styles.formGroup}>
-              <Text style={styles.formLabel}>Notes</Text>
-              <TextInput
-                style={[styles.formInput, { height: 70, textAlignVertical: 'top' }]}
-                value={taskStaffNote}
-                onChangeText={setTaskStaffNote}
-                multiline
-              />
-            </View>
+              <View style={styles.formGroup}>
+                <Text style={styles.formLabel}>Original Message</Text>
+                <View style={styles.quoteBoxModal}>
+                  <Text style={styles.quoteBoxText}>"{taskOriginalMessage}"</Text>
+                </View>
+              </View>
 
-            <View style={styles.formGroup}>
-              <Text style={styles.formLabel}>Due Date</Text>
-              <TextInput
-                style={styles.formInput}
-                value={taskDueDate}
-                onChangeText={setTaskDueDate}
-                placeholder="YYYY-MM-DD"
-                placeholderTextColor={COLORS.textSubtle}
-              />
-            </View>
+              <View style={styles.formGroup}>
+                <Text style={styles.formLabel}>Notes</Text>
+                <TextInput
+                  style={[styles.formInput, { height: 70, textAlignVertical: 'top' }]}
+                  value={taskStaffNote}
+                  onChangeText={setTaskStaffNote}
+                  multiline
+                />
+              </View>
 
-            <View style={styles.formGroup}>
-              <Text style={styles.formLabel}>Time</Text>
-              <TextInput
-                style={styles.formInput}
-                value={taskTime}
-                onChangeText={setTaskTime}
-                placeholder="10:00 AM"
-                placeholderTextColor={COLORS.textSubtle}
-              />
-            </View>
+              <View style={styles.formGroup}>
+                <Text style={styles.formLabel}>Due Date</Text>
+                <TextInput
+                  style={styles.formInput}
+                  value={taskDueDate}
+                  onChangeText={setTaskDueDate}
+                  placeholder="DD/MM/YYYY"
+                  placeholderTextColor={COLORS.textSubtle}
+                />
+              </View>
 
-            <TouchableOpacity style={styles.modalSubmitBtn} onPress={handleSaveTask}>
-              <Text style={styles.modalSubmitText}>Save</Text>
-            </TouchableOpacity>
+              <View style={styles.formGroup}>
+                <Text style={styles.formLabel}>Time</Text>
+                <TextInput
+                  style={styles.formInput}
+                  value={taskTime}
+                  onChangeText={setTaskTime}
+                  placeholder="6:48 pm"
+                  placeholderTextColor={COLORS.textSubtle}
+                />
+              </View>
+
+              {/* Assign Task To */}
+              <View style={styles.formGroup}>
+                <Text style={styles.formLabel}>Assign Task To</Text>
+                <View style={styles.assignChipsContainer}>
+                  <TouchableOpacity
+                    style={[styles.assignChip, !assignedUser && styles.assignChipActive]}
+                    onPress={() => setAssignedUser(null)}
+                    activeOpacity={0.7}
+                  >
+                    <Text style={[styles.assignChipText, !assignedUser && styles.assignChipTextActive]}>
+                      Unassigned
+                    </Text>
+                    {!assignedUser ? (
+                      <Icon name="check" size={12} color={COLORS.primary} strokeWidth={3} />
+                    ) : null}
+                  </TouchableOpacity>
+
+                  {availableAssignMembers.map((member) => {
+                    const isSelected = assignedUser?.id === member.id;
+                    return (
+                      <TouchableOpacity
+                        key={member.id}
+                        style={[styles.assignChip, isSelected && styles.assignChipActive]}
+                        onPress={() => setAssignedUser(member)}
+                        activeOpacity={0.7}
+                      >
+                        <View style={[styles.chipAvatar, isSelected && styles.chipAvatarActive]}>
+                          <Text style={[styles.chipAvatarText, isSelected && styles.chipAvatarTextActive]}>
+                            {(member.name || 'U').charAt(0).toUpperCase()}
+                          </Text>
+                        </View>
+                        <Text style={[styles.assignChipText, isSelected && styles.assignChipTextActive]}>
+                          {member.name}
+                        </Text>
+                        {isSelected ? (
+                          <Icon name="check" size={12} color={COLORS.primary} strokeWidth={3} />
+                        ) : null}
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              </View>
+
+              <TouchableOpacity style={styles.modalSubmitBtn} onPress={handleSaveTask}>
+                <Text style={styles.modalSubmitText}>Save</Text>
+              </TouchableOpacity>
+            </ScrollView>
           </View>
         </View>
       </Modal>
@@ -400,13 +520,10 @@ const styles = StyleSheet.create({
     gap: 12,
   },
   backBtn: {
-    paddingVertical: 4,
-    paddingHorizontal: 6,
-  },
-  backBtnText: {
-    color: COLORS.bgWhite,
-    fontSize: 16,
-    fontWeight: '700',
+    paddingVertical: 6,
+    paddingHorizontal: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   headerInfo: {
     flex: 1,
@@ -558,7 +675,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     paddingHorizontal: SPACING.md,
-    paddingVertical: 8,
+    paddingTop: 8,
     backgroundColor: COLORS.bgWhite,
     borderTopWidth: 1,
     borderTopColor: COLORS.borderColor,
@@ -689,5 +806,54 @@ const styles = StyleSheet.create({
     color: COLORS.primaryNavy,
     letterSpacing: 0.5,
     textTransform: 'uppercase',
+  },
+  assignChipsContainer: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginTop: 4,
+  },
+  assignChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: RADIUS.full,
+    backgroundColor: COLORS.inputBg,
+    borderWidth: 1,
+    borderColor: COLORS.borderColor,
+  },
+  assignChipActive: {
+    backgroundColor: '#EFF6FF',
+    borderColor: COLORS.primary,
+  },
+  assignChipText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: COLORS.textDark,
+  },
+  assignChipTextActive: {
+    color: COLORS.primary,
+    fontWeight: '700',
+  },
+  chipAvatar: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: COLORS.textMuted,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  chipAvatarActive: {
+    backgroundColor: COLORS.primary,
+  },
+  chipAvatarText: {
+    color: COLORS.bgWhite,
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  chipAvatarTextActive: {
+    color: COLORS.bgWhite,
   },
 });

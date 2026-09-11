@@ -1,13 +1,14 @@
 const pool = require('../config/db');
 const { Conversation, Message } = require('../models');
-const whatsappService = require('../services/whatsappService');
+const sessionManager = require('../services/sessionManager');
 const socketService = require('../services/socketService');
 
 // GET /api/conversations
 async function getConversations(req, res, next) {
   try {
     const { search } = req.query;
-    const conversations = await Conversation.findAll({ search });
+    const userId = req.user ? req.user.id : null;
+    const conversations = await Conversation.findAll({ search, userId });
 
     return res.status(200).json({
       success: true,
@@ -38,10 +39,11 @@ async function getMessages(req, res, next) {
 
     // Sync latest messages for this conversation from WhatsApp Web if available
     const [custRows] = await pool.execute('SELECT id, whatsapp_jid FROM customers WHERE id = ?', [conversation.customer_id]);
-    if (custRows.length > 0 && custRows[0].whatsapp_jid && whatsappService.client && whatsappService.client.pupPage) {
+    const userSession = sessionManager.getSession(req.user?.id);
+    if (custRows.length > 0 && custRows[0].whatsapp_jid && userSession && userSession.client && userSession.client.pupPage) {
       const jid = custRows[0].whatsapp_jid;
       try {
-        const liveMsgs = await whatsappService.fetchMessagesForChat(jid, 40);
+        const liveMsgs = await userSession.fetchMessagesForChat(jid, 40);
         if (liveMsgs.length > 0) {
           for (const m of liveMsgs) {
             const iso = new Date(m.timestamp * 1000).toISOString().slice(0, 19).replace('T', ' ');
@@ -121,16 +123,19 @@ async function sendMessage(req, res, next) {
     socketService.broadcastNewMessage(id, savedMessage);
     socketService.broadcastConversationUpdate(updatedConversation);
 
-    // 3. Send ONCE via WhatsApp Web client if connected
-    whatsappService.sendMessage(conversation.phone_number, text.trim())
-      .then((waResult) => {
-        if (waResult && waResult.success && waResult.messageId) {
-          pool.execute('UPDATE messages SET whatsapp_message_id = ? WHERE id = ?', [waResult.messageId, savedMessage.id]);
-        }
-      })
-      .catch((err) => {
-        console.error('[WhatsApp Send Error]', err.message);
-      });
+    // 3. Send ONCE via WhatsApp Web client if connected for this user
+    const userSession = sessionManager.getSession(req.user?.id);
+    if (userSession && userSession.isConnected) {
+      userSession.sendMessage(conversation.phone_number, text.trim())
+        .then((waResult) => {
+          if (waResult && waResult.success && waResult.messageId) {
+            pool.execute('UPDATE messages SET whatsapp_message_id = ? WHERE id = ?', [waResult.messageId, savedMessage.id]);
+          }
+        })
+        .catch((err) => {
+          console.error('[WhatsApp Send Error]', err.message);
+        });
+    }
 
     return res.status(201).json({
       success: true,

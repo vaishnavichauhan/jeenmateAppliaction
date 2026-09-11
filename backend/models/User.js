@@ -11,12 +11,17 @@ const User = {
     return rows[0] || null;
   },
 
-  async create({ name, email, password, role = 'agent' }) {
+  async create({ name, email, password, role = 'user' }) {
     const [result] = await pool.execute(
       'INSERT INTO users (name, email, password, role) VALUES (?, ?, ?, ?)',
       [name, email.trim().toLowerCase(), password, role]
     );
     return this.findById(result.insertId);
+  },
+
+  async findAll() {
+    const [rows] = await pool.execute('SELECT id, name, email, role, created_at FROM users ORDER BY name ASC');
+    return rows;
   }
 };
 

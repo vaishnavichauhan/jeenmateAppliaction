@@ -1,5 +1,6 @@
 import React from 'react';
-import { StyleSheet, View } from 'react-native';
+import { StyleSheet, Platform } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { HomeScreen } from '../screens/home/HomeScreen';
 import { LinkScreen } from '../screens/link/LinkScreen';
@@ -14,6 +15,11 @@ const Tab = createBottomTabNavigator();
 
 export const BottomTabNavigator: React.FC = () => {
   const pendingTasks = useTaskStore((s) => s.counts.pending);
+  const insets = useSafeAreaInsets();
+
+  // Calculate safe bottom padding for Android gesture navigation bar
+  const safeBottomInset = Math.max(insets.bottom, Platform.OS === 'android' ? 12 : 0);
+  const tabBarHeight = 56 + safeBottomInset;
 
   return (
     <Tab.Navigator
@@ -22,7 +28,13 @@ export const BottomTabNavigator: React.FC = () => {
         headerShown: false,
         tabBarActiveTintColor: COLORS.primary,
         tabBarInactiveTintColor: COLORS.textMuted,
-        tabBarStyle: styles.tabBar,
+        tabBarStyle: [
+          styles.tabBar,
+          {
+            height: tabBarHeight,
+            paddingBottom: safeBottomInset > 0 ? safeBottomInset : 6,
+          },
+        ],
         tabBarLabelStyle: styles.tabBarLabel,
       }}
     >
@@ -91,9 +103,12 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.bgWhite,
     borderTopColor: COLORS.borderColor,
     borderTopWidth: 1,
-    height: 60,
-    paddingBottom: 6,
     paddingTop: 6,
+    elevation: 8,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: -2 },
+    shadowOpacity: 0.05,
+    shadowRadius: 4,
   },
   tabBarLabel: {
     fontSize: 11,

@@ -163,7 +163,7 @@ export const SettingsScreen: React.FC = () => {
         <Text style={styles.fullLogoutButtonText}>Sign Out of Staff Account</Text>
       </TouchableOpacity>
 
-      <Text style={styles.footerVersion}>jeenMate Mobile Staff v1.0.0 (Build 2026.09)</Text>
+      <Text style={styles.footerVersion}>jeenMate Mobile App v1.0.0 (Build 11.09.2026)</Text>
 
       {/* Server IP Edit Modal */}
       <Modal

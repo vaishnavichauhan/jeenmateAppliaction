@@ -38,7 +38,38 @@ async function initDb() {
         due_date VARCHAR(30),
         status ENUM('pending', 'completed') DEFAULT 'pending',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        user_id INT NULL,
+        created_by_id INT NULL,
+        created_by_name VARCHAR(100) NULL,
+        assigned_to_id INT NULL,
+        assigned_by_id INT NULL,
+        assigned_by_name VARCHAR(100) NULL
+      );
+    `);
+
+    try {
+      await connection.execute('ALTER TABLE tasks ADD COLUMN assigned_to_id INT NULL');
+    } catch (e) {}
+    try {
+      await connection.execute('ALTER TABLE tasks ADD COLUMN assigned_by_id INT NULL');
+    } catch (e) {}
+    try {
+      await connection.execute('ALTER TABLE tasks ADD COLUMN assigned_by_name VARCHAR(100) NULL');
+    } catch (e) {}
+
+    // Create whatsapp_calls table if not exists
+    await connection.execute(`
+      CREATE TABLE IF NOT EXISTS whatsapp_calls (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        call_id VARCHAR(100),
+        phone_number VARCHAR(30) NOT NULL,
+        customer_name VARCHAR(100),
+        call_type ENUM('incoming', 'outgoing', 'missed') DEFAULT 'incoming',
+        media_type ENUM('voice', 'video') DEFAULT 'voice',
+        duration VARCHAR(30),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        user_id INT NULL
       );
     `);
 

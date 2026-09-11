@@ -1,22 +1,29 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import {
   View,
   Text,
   FlatList,
+  ScrollView,
   TouchableOpacity,
   StyleSheet,
   RefreshControl,
   TextInput,
   Modal,
   Alert,
+  ActivityIndicator,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useTaskStore, CRMTask } from '../../store/taskStore';
+import { useNavigation, useFocusEffect } from '@react-navigation/native';
+import { useTaskStore, CRMTask, TeamMember } from '../../store/taskStore';
+import { useAuthStore } from '../../store/authStore';
 import { COLORS, SPACING, RADIUS } from '../../constants/theme';
 import { Icon } from '../../components/common/Icon';
 
 export const HomeScreen: React.FC = () => {
   const insets = useSafeAreaInsets();
+  const navigation = useNavigation<any>();
+  const { user } = useAuthStore();
+  const isAdmin = user?.role === 'admin';
   const {
     tasks,
     counts,
@@ -26,12 +33,21 @@ export const HomeScreen: React.FC = () => {
     toggleTaskStatus,
     deleteTask,
     addTask,
+    assignTask,
+    teamMembers,
+    fetchTeamMembers,
     clearCompletedTasks,
     isRefreshing,
   } = useTaskStore();
 
   const [search, setSearch] = useState('');
   const [showAddModal, setShowAddModal] = useState(false);
+
+  // Assign task modal state
+  const [showAssignModal, setShowAssignModal] = useState(false);
+  const [selectedTaskForAssign, setSelectedTaskForAssign] = useState<CRMTask | null>(null);
+  const [assignSearch, setAssignSearch] = useState('');
+  const [isAssigning, setIsAssigning] = useState(false);
 
   // New task form state
   const [newCustomerName, setNewCustomerName] = useState('');
@@ -40,16 +56,62 @@ export const HomeScreen: React.FC = () => {
   const [newDueDate, setNewDueDate] = useState(
     new Date(Date.now() + 24 * 3600 * 1000).toISOString().split('T')[0]
   );
+  const [newAssignedUser, setNewAssignedUser] = useState<TeamMember | null>(null);
 
   useEffect(() => {
     fetchTasks();
   }, [fetchTasks]);
 
+  useFocusEffect(
+    useCallback(() => {
+      fetchTasks();
+    }, [fetchTasks])
+  );
+
+  const availableAssignMembers = teamMembers.filter((m) => {
+    // Exclude own user from assign selection (e.g. if Tanmay logged in, don't show Tanmay)
+    if (user) {
+      if (user.id && String(m.id) === String(user.id)) return false;
+      if (user.email && m.email && m.email.toLowerCase() === user.email.toLowerCase()) return false;
+      if (user.name && m.name && m.name.toLowerCase().trim() === user.name.toLowerCase().trim()) return false;
+    }
+    return true;
+  });
+
   const filteredTasks = tasks.filter((task) => {
-    const matchesFilter =
-      filter === 'all' ||
-      (filter === 'pending' && task.status === 'pending') ||
-      (filter === 'completed' && task.status === 'completed');
+    let matchesFilter = true;
+
+    // Check if this task was assigned out by the current user to someone else
+    const isAssignedOut = Boolean(
+      task.assigned_to_name &&
+      user?.id &&
+      (String(task.assigned_by_id || task.created_by_id) === String(user.id)) &&
+      (String(task.user_id) !== String(user.id) || String(task.assigned_to_id) !== String(user.id))
+    );
+
+    // Check if this task was assigned to current user by someone else (e.g. Admin assigned to Tanmay)
+    const isAssignedToMe = Boolean(
+      task.assigned_to_name &&
+      user?.id &&
+      String(task.user_id) === String(user.id) &&
+      (
+        (task.assigned_by_id && String(task.assigned_by_id) !== String(user.id)) ||
+        (task.created_by_id && String(task.created_by_id) !== String(user.id)) ||
+        (task.assigned_by_name && user.name && task.assigned_by_name.toLowerCase().trim() !== user.name.toLowerCase().trim()) ||
+        (task.created_by_name && user.name && task.created_by_name.toLowerCase().trim() !== user.name.toLowerCase().trim())
+      )
+    );
+
+    if (filter === 'pending') {
+      matchesFilter = task.status === 'pending' && !isAssignedOut;
+    } else if (filter === 'assigned') {
+      // Both incoming assigned tasks (AssignBy: Admin) and outgoing assigned tasks (Assigned : Tanmay) show in Assign list!
+      matchesFilter = (isAssignedOut || isAssignedToMe) && task.status !== 'completed';
+    } else if (filter === 'completed') {
+      matchesFilter = task.status === 'completed';
+    } else {
+      matchesFilter = true;
+    }
 
     const matchesSearch =
       !search.trim() ||
@@ -76,6 +138,12 @@ export const HomeScreen: React.FC = () => {
     );
   };
 
+  const handleOpenCreateTask = () => {
+    fetchTeamMembers();
+    setNewAssignedUser(null);
+    setShowAddModal(true);
+  };
+
   const handleCreateTask = async () => {
     if (!newCustomerName.trim() || !newCustomerPhone.trim()) {
       Alert.alert('Missing Info', 'Please enter both customer name and phone number.');
@@ -87,16 +155,69 @@ export const HomeScreen: React.FC = () => {
       customerPhone: newCustomerPhone.trim(),
       staffNote: newStaffNote.trim(),
       dueDate: newDueDate.trim(),
+      assignedToUserId: newAssignedUser ? newAssignedUser.id : null,
     });
 
     setNewCustomerName('');
     setNewCustomerPhone('');
     setNewStaffNote('');
+    setNewAssignedUser(null);
     setShowAddModal(false);
   };
 
+  const handleOpenAssignModal = (task: CRMTask) => {
+    setSelectedTaskForAssign(task);
+    setAssignSearch('');
+    fetchTeamMembers();
+    setShowAssignModal(true);
+  };
+
+  const handleSelectMemberToAssign = async (member: TeamMember) => {
+    if (!selectedTaskForAssign) return;
+    try {
+      setIsAssigning(true);
+      await assignTask(selectedTaskForAssign.id, member.id);
+      Alert.alert(
+        'Task Assigned',
+        `Task for "${selectedTaskForAssign.customer_name}" has been assigned to ${member.name}.`
+      );
+      setShowAssignModal(false);
+      setSelectedTaskForAssign(null);
+    } catch (error: any) {
+      Alert.alert('Error', error.message || 'Failed to assign task');
+    } finally {
+      setIsAssigning(false);
+    }
+  };
+
+  const filteredTeamMembers = availableAssignMembers.filter((m) => {
+    const q = assignSearch.trim().toLowerCase();
+    if (!q) return true;
+    return (
+      m.name.toLowerCase().includes(q) ||
+      m.email.toLowerCase().includes(q) ||
+      m.role.toLowerCase().includes(q)
+    );
+  });
+
   const renderTaskItem = ({ item }: { item: CRMTask }) => {
     const isDone = item.status === 'completed';
+    const assignerId = item.assigned_by_id || item.created_by_id;
+    const assignerRawName = item.assigned_by_name || item.created_by_name;
+    const isAssignedByOther = Boolean(
+      item.assigned_to_name && (
+        (assignerId && user?.id && String(assignerId) !== String(user.id)) ||
+        (assignerRawName && user?.name && assignerRawName.toLowerCase().trim() !== user.name.toLowerCase().trim())
+      )
+    );
+
+    const formatAssignerName = (rawName?: string) => {
+      if (!rawName) return 'Admin';
+      if (rawName.toLowerCase() === 'support admin') return 'Admin';
+      return rawName;
+    };
+
+    const assignerDisplay = formatAssignerName(assignerRawName);
 
     return (
       <View style={[styles.taskCard, isDone && styles.taskCardCompleted]}>
@@ -110,10 +231,10 @@ export const HomeScreen: React.FC = () => {
           </TouchableOpacity>
 
           <View style={styles.customerInfo}>
-            <Text style={[styles.customerName, isDone && styles.textCompleted]}>
+            <Text style={[styles.customerName, isDone && styles.textCompleted]} numberOfLines={1}>
               {item.customer_name}
             </Text>
-            <Text style={styles.customerPhone}>{item.customer_phone}</Text>
+            <Text style={styles.customerPhone} numberOfLines={1}>{item.customer_phone}</Text>
           </View>
 
           <View style={[styles.statusBadge, isDone ? styles.badgeDone : styles.badgePending]}>
@@ -121,6 +242,17 @@ export const HomeScreen: React.FC = () => {
               {isDone ? 'Completed' : 'Pending'}
             </Text>
           </View>
+
+          {!item.assigned_to_name && !isAssignedByOther ? (
+            <TouchableOpacity
+              style={styles.assignButton}
+              onPress={() => handleOpenAssignModal(item)}
+              activeOpacity={0.7}
+            >
+              <Icon name="user-plus" size={12} color={COLORS.primary} />
+              <Text style={styles.assignButtonText}>Assign</Text>
+            </TouchableOpacity>
+          ) : null}
 
           <TouchableOpacity
             style={styles.deleteIconButton}
@@ -147,11 +279,41 @@ export const HomeScreen: React.FC = () => {
           </View>
         ) : null}
 
+        {item.created_by_name || item.assigned_to_name ? (
+          <View style={styles.assignedInfoRow}>
+            <Text style={styles.assignedInfoText}>
+              {item.created_by_name ? (
+                <>Created by <Text style={styles.assignedInfoBold}>{item.created_by_name}</Text></>
+              ) : null}
+              {item.created_by_name && item.assigned_to_name ? ' • ' : ''}
+              {item.assigned_to_name ? (
+                <>Assigned to <Text style={[styles.assignedInfoBold, { color: COLORS.primary }]}>{item.assigned_to_name}</Text></>
+              ) : null}
+            </Text>
+          </View>
+        ) : null}
+
         <View style={styles.taskFooter}>
           <View style={styles.dueDateRow}>
-            <Icon name="calendar" size={14} color={COLORS.textMuted} />
+            <Icon name="calendar" size={13} color={COLORS.textMuted} />
             <Text style={styles.dueDateText}>Due: {item.due_date || 'No due date'}</Text>
           </View>
+
+          {isAssignedByOther ? (
+            <View style={styles.assignByDisabledBadge}>
+              <Icon name="user" size={12} color="#64748B" />
+              <Text style={styles.assignByDisabledText}>
+                Assigned By: "{assignerDisplay}"
+              </Text>
+            </View>
+          ) : item.assigned_to_name ? (
+            <View style={styles.assignedToDisabledBadge}>
+              <Icon name="user" size={12} color={COLORS.primary} />
+              <Text style={styles.assignedToDisabledText}>
+                Assigned to: "{item.assigned_to_name}"
+              </Text>
+            </View>
+          ) : null}
         </View>
       </View>
     );
@@ -161,19 +323,45 @@ export const HomeScreen: React.FC = () => {
     <View style={styles.container}>
       {/* Header Bar */}
       <View style={[styles.header, { paddingTop: Math.max(insets.top, 20) + 12 }]}>
-        <Text style={styles.headerTitle}>JeenMate</Text>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.headerTitle}>JeenMate</Text>
+          <Text style={styles.headerGreeting}>
+            👋 Hello, <Text style={styles.headerUserName}>{user?.name || 'User'}</Text>
+          </Text>
+        </View>
+        {/* User Avatar */}
+        <View style={styles.userAvatarCircle}>
+          <Text style={styles.userAvatarText}>
+            {(user?.name || 'U').charAt(0).toUpperCase()}
+          </Text>
+        </View>
       </View>
 
-      {/* Summary Metrics Chips */}
-      <View style={styles.metricsContainer}>
-        <TouchableOpacity
-          style={[styles.metricCard, filter === 'all' && styles.metricCardActive]}
-          onPress={() => setFilter('all')}
-        >
-          <Text style={styles.metricNumber}>{counts.total}</Text>
-          <Text style={styles.metricLabel}>Total Tasks</Text>
-        </TouchableOpacity>
+      {/* Admin – Create User Section */}
+      {isAdmin && (
+        <View style={styles.adminSection}>
+          <View style={styles.adminSectionLeft}>
+            <View style={styles.adminIconBox}>
+              <Icon name="users" size={18} color={COLORS.primary} />
+            </View>
+            <View>
+              <Text style={styles.adminSectionTitle}>Team Management</Text>
+              <Text style={styles.adminSectionSub}>Add new staff members</Text>
+            </View>
+          </View>
+          <TouchableOpacity
+            style={styles.createUserBtn}
+            onPress={() => navigation.navigate('CreateUser')}
+            activeOpacity={0.8}
+          >
+            <Icon name="user-plus" size={14} color={COLORS.bgWhite} strokeWidth={2.5} />
+            <Text style={styles.createUserBtnText}>Create User</Text>
+          </TouchableOpacity>
+        </View>
+      )}
 
+      {/* Summary Metrics Chips (Pending, Assign, Completed, Total) */}
+      <View style={styles.metricsContainer}>
         <TouchableOpacity
           style={[styles.metricCard, filter === 'pending' && styles.metricCardActive]}
           onPress={() => setFilter('pending')}
@@ -183,11 +371,27 @@ export const HomeScreen: React.FC = () => {
         </TouchableOpacity>
 
         <TouchableOpacity
+          style={[styles.metricCard, filter === 'assigned' && styles.metricCardActive]}
+          onPress={() => setFilter('assigned')}
+        >
+          <Text style={[styles.metricNumber, { color: '#8B5CF6' }]}>{counts.assigned || 0}</Text>
+          <Text style={styles.metricLabel}>Assign</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
           style={[styles.metricCard, filter === 'completed' && styles.metricCardActive]}
           onPress={() => setFilter('completed')}
         >
           <Text style={[styles.metricNumber, { color: COLORS.whatsappGreen }]}>{counts.completed}</Text>
           <Text style={styles.metricLabel}>Completed</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={[styles.metricCard, filter === 'all' && styles.metricCardActive]}
+          onPress={() => setFilter('all')}
+        >
+          <Text style={styles.metricNumber}>{counts.total}</Text>
+          <Text style={styles.metricLabel}>Total</Text>
         </TouchableOpacity>
       </View>
 
@@ -224,7 +428,7 @@ export const HomeScreen: React.FC = () => {
 
         <TouchableOpacity
           style={styles.actionAddButton}
-          onPress={() => setShowAddModal(true)}
+          onPress={handleOpenCreateTask}
           activeOpacity={0.8}
         >
           <Icon name="plus" size={15} color={COLORS.bgWhite} strokeWidth={2.5} />
@@ -270,55 +474,226 @@ export const HomeScreen: React.FC = () => {
               </TouchableOpacity>
             </View>
 
-            <View style={styles.formGroup}>
-              <Text style={styles.formLabel}>Customer Name *</Text>
-              <TextInput
-                style={styles.formInput}
-                placeholder="e.g. Ramesh Kumar"
-                placeholderTextColor={COLORS.textSubtle}
-                value={newCustomerName}
-                onChangeText={setNewCustomerName}
-              />
-            </View>
+            <ScrollView
+              style={{ maxHeight: 420 }}
+              contentContainerStyle={{ paddingBottom: 10 }}
+              showsVerticalScrollIndicator={false}
+              keyboardShouldPersistTaps="handled"
+            >
+              <View style={styles.formGroup}>
+                <Text style={styles.formLabel}>Customer Name *</Text>
+                <TextInput
+                  style={styles.formInput}
+                  placeholder="e.g. Ramesh Kumar"
+                  placeholderTextColor={COLORS.textSubtle}
+                  value={newCustomerName}
+                  onChangeText={setNewCustomerName}
+                />
+              </View>
 
-            <View style={styles.formGroup}>
-              <Text style={styles.formLabel}>Customer WhatsApp Phone *</Text>
-              <TextInput
-                style={styles.formInput}
-                placeholder="e.g. +91 98765 43210"
-                placeholderTextColor={COLORS.textSubtle}
-                keyboardType="phone-pad"
-                value={newCustomerPhone}
-                onChangeText={setNewCustomerPhone}
-              />
-            </View>
+              <View style={styles.formGroup}>
+                <Text style={styles.formLabel}>Customer WhatsApp Phone *</Text>
+                <TextInput
+                  style={styles.formInput}
+                  placeholder="e.g. +91 98765 43210"
+                  placeholderTextColor={COLORS.textSubtle}
+                  keyboardType="phone-pad"
+                  value={newCustomerPhone}
+                  onChangeText={setNewCustomerPhone}
+                />
+              </View>
 
-            <View style={styles.formGroup}>
-              <Text style={styles.formLabel}>Staff Follow-up Note</Text>
-              <TextInput
-                style={[styles.formInput, { height: 72, textAlignVertical: 'top' }]}
-                placeholder="e.g. Call customer at 3 PM to confirm invoice"
-                placeholderTextColor={COLORS.textSubtle}
-                multiline
-                value={newStaffNote}
-                onChangeText={setNewStaffNote}
-              />
-            </View>
+              <View style={styles.formGroup}>
+                <Text style={styles.formLabel}>Staff Follow-up Note</Text>
+                <TextInput
+                  style={[styles.formInput, { height: 72, textAlignVertical: 'top' }]}
+                  placeholder="e.g. Call customer at 3 PM to confirm invoice"
+                  placeholderTextColor={COLORS.textSubtle}
+                  multiline
+                  value={newStaffNote}
+                  onChangeText={setNewStaffNote}
+                />
+              </View>
 
-            <View style={styles.formGroup}>
-              <Text style={styles.formLabel}>Due Date (YYYY-MM-DD)</Text>
-              <TextInput
-                style={styles.formInput}
-                placeholder="YYYY-MM-DD"
-                placeholderTextColor={COLORS.textSubtle}
-                value={newDueDate}
-                onChangeText={setNewDueDate}
-              />
-            </View>
+              <View style={styles.formGroup}>
+                <Text style={styles.formLabel}>Due Date (YYYY-MM-DD)</Text>
+                <TextInput
+                  style={styles.formInput}
+                  placeholder="YYYY-MM-DD"
+                  placeholderTextColor={COLORS.textSubtle}
+                  value={newDueDate}
+                  onChangeText={setNewDueDate}
+                />
+              </View>
+
+              {/* Assign To Field */}
+              <View style={styles.formGroup}>
+                <Text style={styles.formLabel}>Assign Task To</Text>
+                <View style={styles.assignChipsContainer}>
+                  <TouchableOpacity
+                    style={[styles.assignChip, !newAssignedUser && styles.assignChipActive]}
+                    onPress={() => setNewAssignedUser(null)}
+                    activeOpacity={0.7}
+                  >
+                    <Text style={[styles.assignChipText, !newAssignedUser && styles.assignChipTextActive]}>
+                      Unassigned
+                    </Text>
+                    {!newAssignedUser ? (
+                      <Icon name="check" size={12} color={COLORS.primary} strokeWidth={3} />
+                    ) : null}
+                  </TouchableOpacity>
+
+                  {availableAssignMembers.map((member) => {
+                    const isSelected = newAssignedUser?.id === member.id;
+                    return (
+                      <TouchableOpacity
+                        key={member.id}
+                        style={[styles.assignChip, isSelected && styles.assignChipActive]}
+                        onPress={() => setNewAssignedUser(member)}
+                        activeOpacity={0.7}
+                      >
+                        <View style={[styles.chipAvatar, isSelected && styles.chipAvatarActive]}>
+                          <Text style={[styles.chipAvatarText, isSelected && styles.chipAvatarTextActive]}>
+                            {(member.name || 'U').charAt(0).toUpperCase()}
+                          </Text>
+                        </View>
+                        <Text style={[styles.assignChipText, isSelected && styles.assignChipTextActive]}>
+                          {member.name}
+                        </Text>
+                        {isSelected ? (
+                          <Icon name="check" size={12} color={COLORS.primary} strokeWidth={3} />
+                        ) : null}
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              </View>
+            </ScrollView>
 
             <TouchableOpacity style={styles.modalSubmitBtn} onPress={handleCreateTask}>
               <Text style={styles.modalSubmitText}>Save Task</Text>
             </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Assign Task Modal */}
+      <Modal
+        visible={showAssignModal}
+        animationType="slide"
+        transparent={true}
+        onRequestClose={() => {
+          if (!isAssigning) setShowAssignModal(false);
+        }}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={[styles.modalCard, styles.assignModalCard]}>
+            <View style={styles.modalHeader}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.modalTitle}>Assign Task</Text>
+                {selectedTaskForAssign ? (
+                  <Text style={styles.assignModalSub} numberOfLines={1}>
+                    For: {selectedTaskForAssign.customer_name} ({selectedTaskForAssign.customer_phone})
+                  </Text>
+                ) : null}
+              </View>
+              <TouchableOpacity
+                onPress={() => setShowAssignModal(false)}
+                disabled={isAssigning}
+                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+              >
+                <Text style={styles.modalCloseText}>✕</Text>
+              </TouchableOpacity>
+            </View>
+
+            {/* Search Team Members Bar */}
+            <View style={styles.assignSearchWrapper}>
+              <Icon name="search" size={16} color={COLORS.textMuted} />
+              <TextInput
+                style={styles.assignSearchInput}
+                placeholder="Search staff by name or email..."
+                placeholderTextColor={COLORS.textSubtle}
+                value={assignSearch}
+                onChangeText={setAssignSearch}
+                autoCapitalize="none"
+              />
+            </View>
+
+            {isAssigning ? (
+              <View style={styles.assignLoadingContainer}>
+                <ActivityIndicator size="large" color={COLORS.primary} />
+                <Text style={styles.assignLoadingText}>Assigning task...</Text>
+              </View>
+            ) : (
+              <FlatList
+                data={filteredTeamMembers}
+                keyExtractor={(member) => String(member.id)}
+                style={styles.membersList}
+                keyboardShouldPersistTaps="handled"
+                renderItem={({ item: member }) => {
+                  const isCurrent =
+                    selectedTaskForAssign &&
+                    (selectedTaskForAssign.user_id === member.id ||
+                      selectedTaskForAssign.assigned_to_name === member.name);
+
+                  return (
+                    <TouchableOpacity
+                      style={[styles.memberRow, isCurrent && styles.memberRowSelected]}
+                      onPress={() => handleSelectMemberToAssign(member)}
+                      activeOpacity={0.7}
+                    >
+                      <View style={styles.memberAvatar}>
+                        <Text style={styles.memberAvatarText}>
+                          {(member.name || 'U').charAt(0).toUpperCase()}
+                        </Text>
+                      </View>
+
+                      <View style={styles.memberDetails}>
+                        <View style={styles.memberNameRow}>
+                          <Text style={styles.memberName}>{member.name}</Text>
+                          <View
+                            style={[
+                              styles.memberRoleBadge,
+                              member.role === 'admin'
+                                ? styles.roleBadgeAdmin
+                                : styles.roleBadgeUser,
+                            ]}
+                          >
+                            <Text
+                              style={[
+                                styles.memberRoleText,
+                                member.role === 'admin'
+                                  ? styles.roleTextAdmin
+                                  : styles.roleTextUser,
+                              ]}
+                            >
+                              {member.role.toUpperCase()}
+                            </Text>
+                          </View>
+                        </View>
+                        <Text style={styles.memberEmail}>{member.email}</Text>
+                      </View>
+
+                      {isCurrent ? (
+                        <View style={styles.currentBadge}>
+                          <Text style={styles.currentBadgeText}>Assigned</Text>
+                        </View>
+                      ) : (
+                        <View style={styles.assignActionBtn}>
+                          <Text style={styles.assignActionBtnText}>Assign</Text>
+                        </View>
+                      )}
+                    </TouchableOpacity>
+                  );
+                }}
+                ListEmptyComponent={
+                  <View style={styles.emptyMembersContainer}>
+                    <Icon name="users" size={32} color={COLORS.textSubtle} />
+                    <Text style={styles.emptyMembersText}>No staff members found</Text>
+                  </View>
+                }
+              />
+            )}
           </View>
         </View>
       </Modal>
@@ -347,6 +722,102 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     color: COLORS.primaryNavy,
   },
+  headerGreeting: {
+    fontSize: 12,
+    color: COLORS.textMuted,
+    marginTop: 2,
+  },
+  headerUserName: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: COLORS.primary,
+  },
+  userAvatarCircle: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: COLORS.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: COLORS.primary,
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  userAvatarText: {
+    color: COLORS.bgWhite,
+    fontSize: 16,
+    fontWeight: '800',
+  },
+
+  headerRoleBadge: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: COLORS.primary,
+    marginTop: 2,
+    opacity: 0.8,
+  },
+  createUserBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: COLORS.primary,
+    paddingHorizontal: 13,
+    paddingVertical: 8,
+    borderRadius: RADIUS.md,
+    gap: 6,
+    shadowColor: COLORS.primary,
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  createUserBtnText: {
+    color: COLORS.bgWhite,
+    fontWeight: '700',
+    fontSize: 12,
+  },
+  adminSection: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: COLORS.bgWhite,
+    marginHorizontal: SPACING.lg,
+    marginTop: SPACING.md,
+    padding: SPACING.md,
+    borderRadius: RADIUS.lg,
+    borderWidth: 1,
+    borderColor: 'rgba(26, 59, 113, 0.12)',
+    shadowColor: COLORS.primary,
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.06,
+    shadowRadius: 6,
+    elevation: 2,
+  },
+  adminSectionLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  adminIconBox: {
+    width: 38,
+    height: 38,
+    borderRadius: RADIUS.md,
+    backgroundColor: 'rgba(26, 59, 113, 0.08)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  adminSectionTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: COLORS.primaryNavy,
+  },
+  adminSectionSub: {
+    fontSize: 11,
+    color: COLORS.textMuted,
+    marginTop: 1,
+  },
+
   headerSub: {
     fontSize: 12,
     color: COLORS.textMuted,
@@ -368,32 +839,32 @@ const styles = StyleSheet.create({
   },
   metricsContainer: {
     flexDirection: 'row',
-    paddingHorizontal: SPACING.lg,
+    paddingHorizontal: SPACING.md,
     paddingTop: SPACING.md,
-    gap: 10,
+    gap: 6,
   },
   metricCard: {
     flex: 1,
     backgroundColor: COLORS.bgWhite,
-    borderRadius: RADIUS.lg,
-    paddingVertical: 12,
-    paddingHorizontal: 10,
+    borderRadius: RADIUS.md,
+    paddingVertical: 10,
+    paddingHorizontal: 4,
     alignItems: 'center',
     borderWidth: 1.5,
     borderColor: COLORS.borderColor,
   },
   metricCardActive: {
     borderColor: COLORS.primary,
-    backgroundColor: 'rgba(26, 59, 113, 0.04)',
+    backgroundColor: 'rgba(26, 59, 113, 0.05)',
   },
   metricNumber: {
-    fontSize: 20,
+    fontSize: 17,
     fontWeight: '800',
     color: COLORS.textDark,
   },
   metricLabel: {
-    fontSize: 11,
-    fontWeight: '600',
+    fontSize: 10,
+    fontWeight: '700',
     color: COLORS.textMuted,
     marginTop: 2,
   },
@@ -476,7 +947,7 @@ const styles = StyleSheet.create({
   taskCardHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 10,
+    gap: 8,
   },
   checkbox: {
     width: 22,
@@ -668,5 +1139,257 @@ const styles = StyleSheet.create({
     color: COLORS.bgWhite,
     fontSize: 15,
     fontWeight: '700',
+  },
+  assignedInfoRow: {
+    marginTop: 6,
+    paddingTop: 6,
+    borderTopWidth: 1,
+    borderTopColor: '#F1F5F9',
+  },
+  assignedInfoText: {
+    fontSize: 11,
+    color: COLORS.textMuted,
+  },
+  assignedInfoBold: {
+    fontWeight: '700',
+    color: COLORS.textDark,
+  },
+  assignButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: '#EFF6FF',
+    borderWidth: 1,
+    borderColor: '#BFDBFE',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: RADIUS.sm,
+  },
+  assignButtonText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: COLORS.primary,
+  },
+  assignModalCard: {
+    maxHeight: '80%',
+    paddingBottom: SPACING.xl,
+  },
+  assignModalSub: {
+    fontSize: 12,
+    color: COLORS.textMuted,
+    marginTop: 2,
+  },
+  assignSearchWrapper: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: COLORS.inputBg,
+    borderRadius: RADIUS.md,
+    borderWidth: 1,
+    borderColor: COLORS.borderColor,
+    paddingHorizontal: 12,
+    height: 42,
+    marginBottom: 14,
+    gap: 8,
+  },
+  assignSearchInput: {
+    flex: 1,
+    fontSize: 13,
+    color: COLORS.textDark,
+    paddingVertical: 0,
+  },
+  assignLoadingContainer: {
+    paddingVertical: 40,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+  },
+  assignLoadingText: {
+    fontSize: 13,
+    color: COLORS.textMuted,
+  },
+  membersList: {
+    maxHeight: 320,
+  },
+  memberRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: RADIUS.md,
+    marginBottom: 6,
+    backgroundColor: COLORS.bgLinen,
+    borderWidth: 1,
+    borderColor: 'transparent',
+  },
+  memberRowSelected: {
+    backgroundColor: '#EFF6FF',
+    borderColor: '#BFDBFE',
+  },
+  memberAvatar: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: COLORS.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 10,
+  },
+  memberAvatarText: {
+    color: COLORS.bgWhite,
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  memberDetails: {
+    flex: 1,
+  },
+  memberNameRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  memberName: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: COLORS.textDark,
+  },
+  memberRoleBadge: {
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+  },
+  roleBadgeAdmin: {
+    backgroundColor: '#FEF3C7',
+  },
+  roleBadgeUser: {
+    backgroundColor: '#E0E7FF',
+  },
+  memberRoleText: {
+    fontSize: 9,
+    fontWeight: '800',
+    letterSpacing: 0.5,
+  },
+  roleTextAdmin: {
+    color: '#D97706',
+  },
+  roleTextUser: {
+    color: '#4F46E5',
+  },
+  memberEmail: {
+    fontSize: 12,
+    color: COLORS.textMuted,
+    marginTop: 2,
+  },
+  currentBadge: {
+    backgroundColor: '#DCFCE7',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: RADIUS.sm,
+  },
+  currentBadgeText: {
+    color: '#15803D',
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  assignActionBtn: {
+    backgroundColor: COLORS.primary,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: RADIUS.sm,
+  },
+  assignActionBtnText: {
+    color: COLORS.bgWhite,
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  emptyMembersContainer: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 32,
+    gap: 8,
+  },
+  emptyMembersText: {
+    fontSize: 13,
+    color: COLORS.textMuted,
+  },
+  assignChipsContainer: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginTop: 4,
+  },
+  assignChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: RADIUS.full,
+    backgroundColor: COLORS.inputBg,
+    borderWidth: 1,
+    borderColor: COLORS.borderColor,
+  },
+  assignChipActive: {
+    backgroundColor: '#EFF6FF',
+    borderColor: COLORS.primary,
+  },
+  assignChipText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: COLORS.textDark,
+  },
+  assignChipTextActive: {
+    color: COLORS.primary,
+    fontWeight: '700',
+  },
+  chipAvatar: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: COLORS.textMuted,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  chipAvatarActive: {
+    backgroundColor: COLORS.primary,
+  },
+  chipAvatarText: {
+    color: COLORS.bgWhite,
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  chipAvatarTextActive: {
+    color: COLORS.bgWhite,
+  },
+  assignByDisabledBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    backgroundColor: '#F1F5F9',
+    borderWidth: 1,
+    borderColor: '#CBD5E1',
+    paddingHorizontal: 9,
+    paddingVertical: 5,
+    borderRadius: RADIUS.sm,
+  },
+  assignByDisabledText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#475569',
+  },
+  assignedToDisabledBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    backgroundColor: '#EFF6FF',
+    borderWidth: 1,
+    borderColor: '#BFDBFE',
+    paddingHorizontal: 9,
+    paddingVertical: 5,
+    borderRadius: RADIUS.sm,
+  },
+  assignedToDisabledText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: COLORS.primary,
   },
 });

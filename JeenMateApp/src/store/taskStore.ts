@@ -2,6 +2,14 @@ import { create } from 'zustand';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import apiClient from '../services/api';
 
+export interface TeamMember {
+  id: number;
+  name: string;
+  email: string;
+  role: string;
+  avatar?: string;
+}
+
 export interface CRMTask {
   id: string;
   customer_id?: string | null;
@@ -13,25 +21,43 @@ export interface CRMTask {
   status: 'pending' | 'completed';
   created_at?: string;
   updated_at?: string;
+  user_id?: number;
+  assigned_to_id?: number;
+  assigned_to_name?: string;
+  assigned_to_email?: string;
+  created_by_id?: number;
+  created_by_name?: string;
+  assigned_by_id?: number;
+  assigned_by_name?: string;
 }
 
 interface TaskCounts {
   total: number;
   pending: number;
+  assigned: number;
   completed: number;
 }
+
+const computeCounts = (tasks: CRMTask[]): TaskCounts => ({
+  total: tasks.length,
+  pending: tasks.filter((t) => t.status === 'pending').length,
+  assigned: tasks.filter((t) => Boolean(t.assigned_to_name) && t.status !== 'completed').length,
+  completed: tasks.filter((t) => t.status === 'completed').length,
+});
 
 interface TaskState {
   tasks: CRMTask[];
   counts: TaskCounts;
-  filter: 'all' | 'pending' | 'completed';
+  teamMembers: TeamMember[];
+  filter: 'all' | 'pending' | 'assigned' | 'completed';
   selectedCustomer: string | null;
   searchQuery: string;
   isLoading: boolean;
   isRefreshing: boolean;
 
   fetchTasks: () => Promise<void>;
-  setFilter: (filter: 'all' | 'pending' | 'completed') => void;
+  fetchTeamMembers: () => Promise<void>;
+  setFilter: (filter: 'all' | 'pending' | 'assigned' | 'completed') => void;
   setSearchQuery: (query: string) => void;
   setSelectedCustomer: (customer: string | null) => void;
   addTask: (task: {
@@ -41,10 +67,13 @@ interface TaskState {
     originalMessage?: string;
     staffNote?: string;
     dueDate?: string;
+    assignedToUserId?: number | null;
   }) => Promise<boolean>;
+  assignTask: (taskId: string, assignedToUserId: number) => Promise<{ success: boolean; message: string }>;
   toggleTaskStatus: (taskId: string) => Promise<void>;
   deleteTask: (taskId: string) => Promise<void>;
   clearCompletedTasks: () => Promise<void>;
+  resetTasks: () => void;
 }
 
 const STORAGE_KEY_TASKS = '@jeenmate_tasks_cache';
@@ -54,13 +83,26 @@ export const useTaskStore = create<TaskState>((set, get) => ({
   counts: {
     total: 0,
     pending: 0,
+    assigned: 0,
     completed: 0,
   },
+  teamMembers: [],
   filter: 'all',
   selectedCustomer: null,
   searchQuery: '',
   isLoading: false,
   isRefreshing: false,
+
+  fetchTeamMembers: async () => {
+    try {
+      const res = await apiClient.get('/api/auth/users');
+      if (res.data && res.data.success && Array.isArray(res.data.data)) {
+        set({ teamMembers: res.data.data });
+      }
+    } catch (e) {
+      console.log('[TaskStore] Error fetching team members', e);
+    }
+  },
 
   fetchTasks: async () => {
     try {
@@ -71,6 +113,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
         const counts = res.data.counts || {
           total: tasks.length,
           pending: tasks.filter((t) => t.status === 'pending').length,
+          assigned: tasks.filter((t) => t.assigned_to_name && t.status !== 'completed').length,
           completed: tasks.filter((t) => t.status === 'completed').length,
         };
 
@@ -86,11 +129,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
           const tasks: CRMTask[] = JSON.parse(cached).filter((t: any) => !t.id?.startsWith('task_demo_'));
           set({
             tasks,
-            counts: {
-              total: tasks.length,
-              pending: tasks.filter((t) => t.status === 'pending').length,
-              completed: tasks.filter((t) => t.status === 'completed').length,
-            },
+            counts: computeCounts(tasks),
           });
         }
       } catch (e) {}
@@ -121,21 +160,31 @@ export const useTaskStore = create<TaskState>((set, get) => ({
     const updatedTasks = [newTask, ...get().tasks];
     set({
       tasks: updatedTasks,
-      counts: {
-        total: updatedTasks.length,
-        pending: updatedTasks.filter((t) => t.status === 'pending').length,
-        completed: updatedTasks.filter((t) => t.status === 'completed').length,
-      },
+      counts: computeCounts(updatedTasks),
     });
 
     try {
       await apiClient.post('/api/tasks', newTaskData);
       await AsyncStorage.setItem(STORAGE_KEY_TASKS, JSON.stringify(updatedTasks));
+      await get().fetchTasks();
       return true;
     } catch (err) {
       console.warn('[TaskStore] Task saved locally offline');
       await AsyncStorage.setItem(STORAGE_KEY_TASKS, JSON.stringify(updatedTasks));
       return true;
+    }
+  },
+
+  assignTask: async (taskId: string, assignedToUserId: number) => {
+    try {
+      const res = await apiClient.patch(`/api/tasks/${taskId}/assign`, { assignedToUserId });
+      if (res.data && res.data.success) {
+        await get().fetchTasks();
+        return { success: true, message: res.data.message || 'Task assigned successfully' };
+      }
+      return { success: false, message: res.data?.message || 'Failed to assign task' };
+    } catch (err: any) {
+      return { success: false, message: err?.response?.data?.message || err.message || 'Failed to assign task' };
     }
   },
 
@@ -153,11 +202,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
 
     set({
       tasks: updated,
-      counts: {
-        total: updated.length,
-        pending: updated.filter((t) => t.status === 'pending').length,
-        completed: updated.filter((t) => t.status === 'completed').length,
-      },
+      counts: computeCounts(updated),
     });
 
     try {
@@ -174,11 +219,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
 
     set({
       tasks: updated,
-      counts: {
-        total: updated.length,
-        pending: updated.filter((t) => t.status === 'pending').length,
-        completed: updated.filter((t) => t.status === 'completed').length,
-      },
+      counts: computeCounts(updated),
     });
 
     try {
@@ -196,11 +237,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
 
     set({
       tasks: updated,
-      counts: {
-        total: updated.length,
-        pending: updated.length,
-        completed: 0,
-      },
+      counts: computeCounts(updated),
     });
 
     for (const id of completedIds) {
@@ -209,5 +246,18 @@ export const useTaskStore = create<TaskState>((set, get) => ({
       } catch (e) {}
     }
     await AsyncStorage.setItem(STORAGE_KEY_TASKS, JSON.stringify(updated));
+  },
+
+  resetTasks: () => {
+    set({
+      tasks: [],
+      counts: { total: 0, pending: 0, assigned: 0, completed: 0 },
+      teamMembers: [],
+      searchQuery: '',
+      selectedCustomer: null,
+      filter: 'all',
+      isLoading: false,
+      isRefreshing: false,
+    });
   },
 }));

@@ -7,7 +7,7 @@ const config = require('./config/env');
 const db = require('./config/db'); // Ensures SQLite is initialized & seeded
 const routes = require('./routes');
 const socketService = require('./services/socketService');
-const whatsappService = require('./services/whatsappService');
+const sessionManager = require('./services/sessionManager');
 const errorHandler = require('./middlewares/errorHandler');
 
 const app = express();
@@ -71,20 +71,13 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`💬 QR Web Page:     http://localhost:${PORT}/api/whatsapp/qr-page`);
   console.log(`🔑 Default Admin:    admin@support.com / Admin@12345`);
   console.log('====================================================');
-
-  // Initialize WhatsApp Web client in background
-  whatsappService.initialize().catch((err) => {
-    console.error('[WhatsApp] Background initialization warning:', err.message);
-  });
 });
 
 // Graceful shutdown
 async function gracefulShutdown() {
-  console.log('[Server] Shutdown requested. Closing WhatsApp client and server...');
+  console.log('[Server] Shutdown requested. Closing all user WhatsApp sessions...');
   try {
-    if (whatsappService.client) {
-      await whatsappService.client.destroy();
-    }
+    await sessionManager.destroyAll();
   } catch (e) {}
   server.close(() => {
     process.exit(0);

@@ -1,13 +1,36 @@
 const pool = require('../config/db');
-const whatsappService = require('../services/whatsappService');
+const sessionManager = require('../services/sessionManager');
+
+/**
+ * Helper: get the WhatsApp session for the authenticated user.
+ * Auto-creates and initializes if not yet started.
+ */
+async function getUserSession(req) {
+  const userId = req.user.id;
+  return sessionManager.getOrCreateSession(userId);
+}
 
 // GET /api/whatsapp/status
 async function getStatus(req, res, next) {
   try {
-    const status = whatsappService.getStatus();
+    const userId = req.user.id;
+    const service = sessionManager.getSession(userId);
+    if (!service) {
+      return res.status(200).json({
+        success: true,
+        data: {
+          isConnected: false,
+          status: 'offline',
+          phone: null,
+          name: null,
+          hasQr: false,
+          lastUpdated: new Date().toISOString()
+        }
+      });
+    }
     return res.status(200).json({
       success: true,
-      data: status
+      data: service.getStatus()
     });
   } catch (err) {
     next(err);
@@ -17,10 +40,52 @@ async function getStatus(req, res, next) {
 // GET /api/whatsapp/qr
 async function getQr(req, res, next) {
   try {
-    const qrData = whatsappService.getQr();
+    const service = await getUserSession(req);
     return res.status(200).json({
       success: true,
-      data: qrData
+      data: service.getQr()
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// GET /api/whatsapp/call-logs
+async function getCallLogs(req, res, next) {
+  try {
+    const userId = req.user.id;
+    const limit = parseInt(req.query.limit, 10) || 50;
+
+    const service = sessionManager.getSession(userId);
+    if (service) {
+      const callLogs = await service.getCallLogs(limit);
+      return res.status(200).json({
+        success: true,
+        data: callLogs
+      });
+    }
+
+    // Direct DB query for this user (so user sees their own calls even if offline)
+    const [rows] = await pool.execute(
+      `SELECT 
+        id,
+        call_id as callId,
+        customer_name as customerName,
+        phone_number as phoneNumber,
+        call_type as callType,
+        media_type as mediaType,
+        duration,
+        DATE_FORMAT(created_at, '%Y-%m-%dT%H:%i:%s.000Z') as timestamp
+       FROM whatsapp_calls
+       WHERE user_id = ?
+       ORDER BY created_at DESC, id DESC
+       LIMIT ${limit}`,
+      [userId]
+    );
+
+    return res.status(200).json({
+      success: true,
+      data: rows
     });
   } catch (err) {
     next(err);
@@ -30,10 +95,11 @@ async function getQr(req, res, next) {
 // GET /api/whatsapp/qr-inspect
 async function inspectQrPage(req, res, next) {
   try {
-    if (!whatsappService.client || !whatsappService.client.pupPage) {
+    const service = await getUserSession(req);
+    if (!service.client || !service.client.pupPage) {
       return res.json({ success: false, message: 'Client or pupPage not ready' });
     }
-    const info = await whatsappService.client.pupPage.evaluate(() => {
+    const info = await service.client.pupPage.evaluate(() => {
       const qrCanvas = document.querySelector('canvas');
       const qrContainer = document.querySelector('[data-ref]');
       const buttons = Array.from(document.querySelectorAll('button')).map(b => ({
@@ -59,8 +125,9 @@ async function inspectQrPage(req, res, next) {
 // POST /api/whatsapp/restart
 async function restartSession(req, res, next) {
   try {
+    const service = await getUserSession(req);
     const clean = req.query.clean === 'true';
-    const result = await whatsappService.restart(clean);
+    const result = await service.restart(clean);
     return res.status(200).json(result);
   } catch (err) {
     next(err);
@@ -70,15 +137,16 @@ async function restartSession(req, res, next) {
 // POST /api/whatsapp/sync
 async function syncChats(req, res, next) {
   try {
+    const service = await getUserSession(req);
     const cleanOld = req.query.clean === 'true' || req.body?.clean === true;
-    const result = await whatsappService.syncChats({ cleanOld });
+    const result = await service.syncChats({ cleanOld });
     return res.status(200).json(result);
   } catch (err) {
     next(err);
   }
 }
 
-// GET /api/whatsapp/qr-page
+// GET /api/whatsapp/qr-page (HTML page for browser scanning)
 function getQrPage(req, res) {
   const html = `
 <!DOCTYPE html>
@@ -149,70 +217,32 @@ function getQrPage(req, res) {
     .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
     h1 { font-size: 22px; font-weight: 800; margin-bottom: 6px; }
     p.sub { font-size: 14px; opacity: 0.85; }
-    .content {
-      padding: 32px 24px;
-      text-align: center;
-    }
+    .content { padding: 32px 24px; text-align: center; }
     .qr-box {
-      width: 280px;
-      height: 280px;
-      margin: 0 auto 24px;
-      border: 2px dashed var(--border-color);
-      border-radius: 16px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      background: #FAFAFA;
-      position: relative;
+      width: 280px; height: 280px; margin: 0 auto 24px;
+      border: 2px dashed var(--border-color); border-radius: 16px;
+      display: flex; align-items: center; justify-content: center;
+      background: #FAFAFA; position: relative;
     }
-    .qr-box img {
-      width: 100%;
-      height: 100%;
-      border-radius: 14px;
-      object-fit: contain;
-    }
+    .qr-box img { width: 100%; height: 100%; border-radius: 14px; object-fit: contain; }
     .instructions {
-      text-align: left;
-      background: #F8F9FA;
-      border-radius: 12px;
-      padding: 16px 20px;
-      font-size: 13px;
-      line-height: 1.6;
-      margin-bottom: 24px;
-      border: 1px solid var(--border-color);
+      text-align: left; background: #F8F9FA; border-radius: 12px;
+      padding: 16px 20px; font-size: 13px; line-height: 1.6;
+      margin-bottom: 24px; border: 1px solid var(--border-color);
     }
     .instructions ol { padding-left: 20px; }
     .instructions li { margin-bottom: 6px; }
-    .btn-group {
-      display: flex;
-      gap: 12px;
-    }
+    .btn-group { display: flex; gap: 12px; }
     button {
-      flex: 1;
-      padding: 12px 18px;
-      border-radius: 10px;
-      font-size: 14px;
-      font-weight: 600;
-      cursor: pointer;
-      border: none;
-      transition: all 0.2s ease;
+      flex: 1; padding: 12px 18px; border-radius: 10px;
+      font-size: 14px; font-weight: 600; cursor: pointer;
+      border: none; transition: all 0.2s ease;
     }
-    .btn-primary {
-      background: var(--primary);
-      color: white;
-    }
+    .btn-primary { background: var(--primary); color: white; }
     .btn-primary:hover { background: var(--primary-navy); }
-    .btn-danger {
-      background: #FEE2E2;
-      color: var(--accent-red);
-    }
+    .btn-danger { background: #FEE2E2; color: var(--accent-red); }
     .btn-danger:hover { background: #FCA5A5; }
-    .footer {
-      text-align: center;
-      margin-top: 18px;
-      font-size: 12px;
-      color: #64748B;
-    }
+    .footer { text-align: center; margin-top: 18px; font-size: 12px; color: #64748B; }
   </style>
 </head>
 <body>
@@ -223,46 +253,47 @@ function getQrPage(req, res) {
         <span id="statusText">Checking WhatsApp...</span>
       </div>
       <h1>jeenMate WhatsApp Link</h1>
-      <p class="sub">Scan with staff WhatsApp to link customer portal</p>
+      <p class="sub">Scan with your personal WhatsApp to link your session</p>
     </div>
-
     <div class="content">
       <div class="qr-box" id="qrContainer">
-        <div id="loadingText" style="color: #64748B; font-size: 14px;">Loading QR code...</div>
+        <div id="loadingText" style="color: #64748B; font-size: 14px;">Loading QR code...<br><small style="margin-top:8px;display:block">Please log in from the mobile app first.</small></div>
         <img id="qrImage" style="display: none;" alt="WhatsApp QR Code" />
       </div>
-
       <div class="instructions">
         <ol>
-          <li>Open WhatsApp on the staff mobile device.</li>
+          <li>Log in to the jeenMate mobile app first.</li>
+          <li>Open WhatsApp on your personal device.</li>
           <li>Tap <strong>Settings</strong> or <strong>Menu (⋮)</strong> &gt; <strong>Linked Devices</strong>.</li>
           <li>Tap <strong>Link a Device</strong> and point your camera at this QR code.</li>
         </ol>
       </div>
-
       <div class="btn-group">
         <button class="btn-primary" onclick="fetchQr(true)">Refresh QR</button>
         <button class="btn-danger" onclick="resetSession()">Reset Session</button>
       </div>
     </div>
   </div>
-
-  <div class="footer">
-    jeenMate Support Portal • Real-Time WhatsApp Integration
-  </div>
-
+  <div class="footer">jeenMate Support Portal • Per-User WhatsApp Sessions</div>
   <script>
+    // NOTE: This page requires a token query param to identify the user.
+    // Usage: /api/whatsapp/qr-page?token=<jwt_token>
+    const token = new URLSearchParams(window.location.search).get('token') || '';
+    const headers = token ? { 'Authorization': 'Bearer ' + token } : {};
+
     async function fetchQr(showFeedback = false) {
       try {
-        const res = await fetch('/api/whatsapp/qr');
+        const res = await fetch('/api/whatsapp/qr', { headers });
+        if (res.status === 401) {
+          document.getElementById('loadingText').textContent = 'Please log in from the mobile app first to get your QR code.';
+          return;
+        }
         const json = await res.json();
         const data = json.data;
-
         const badge = document.getElementById('statusBadge');
         const statusText = document.getElementById('statusText');
         const qrImage = document.getElementById('qrImage');
         const loadingText = document.getElementById('loadingText');
-
         if (data.isConnected) {
           badge.className = 'badge online';
           statusText.textContent = 'Connected';
@@ -286,13 +317,10 @@ function getQrPage(req, res) {
         console.error('Error fetching QR:', err);
       }
     }
-
     async function resetSession() {
-      if (!confirm('Are you sure you want to disconnect and clear the active WhatsApp Web session?')) {
-        return;
-      }
+      if (!confirm('Are you sure you want to disconnect and clear your WhatsApp session?')) return;
       try {
-        const res = await fetch('/api/whatsapp/restart?clean=true', { method: 'POST' });
+        const res = await fetch('/api/whatsapp/restart?clean=true', { method: 'POST', headers });
         const json = await res.json();
         alert(json.message || 'Session reset initiated.');
         fetchQr();
@@ -300,7 +328,6 @@ function getQrPage(req, res) {
         alert('Failed to reset session: ' + err.message);
       }
     }
-
     fetchQr();
     setInterval(fetchQr, 3000);
   </script>
@@ -313,71 +340,12 @@ function getQrPage(req, res) {
 
 async function debugChats(req, res, next) {
   try {
-    if (!whatsappService.client || !whatsappService.client.pupPage) {
+    const service = await getUserSession(req);
+    if (!service.client || !service.client.pupPage) {
       return res.json({ success: false, message: 'Client or pupPage not ready' });
     }
-    const sample = await whatsappService.client.pupPage.evaluate(() => {
-      const col = window.require ? window.require('WAWebCollections')?.Chat : null;
-      const models = col?.getModelsArray ? col.getModelsArray() : [];
-      if (!models.length) return { error: 'No models found', length: 0 };
-
-      // Return top 15 models with their properties
-      const topChats = models.slice(0, 15).map(c => {
-        let lastMsg = null;
-        try {
-          if (c.lastReceivedKey) {
-            const msgCol = window.require ? window.require('WAWebCollections')?.Msg : null;
-            lastMsg = msgCol?.get ? msgCol.get(c.lastReceivedKey._serialized || c.lastReceivedKey) : null;
-          }
-          if (!lastMsg && c.msgs && c.msgs.last) {
-            lastMsg = c.msgs.last();
-          }
-        } catch (_) {}
-
-        return {
-          id: c.id?._serialized,
-          name: c.formattedTitle || c.name || c.contact?.name || c.contact?.pushname,
-          t: c.t,
-          pin: c.pin || c.pinned,
-          unreadCount: c.unreadCount,
-          lastMsgBody: lastMsg ? lastMsg.body : null,
-          lastMsgType: lastMsg ? lastMsg.type : null,
-          lastMsgT: lastMsg ? lastMsg.t : null,
-          allKeys: Object.keys(c).slice(0, 25)
-        };
-      });
-
-      const findRaj = models.find(c => {
-        const title = (c.formattedTitle || c.name || c.contact?.name || '').toLowerCase();
-        return title.includes('raj');
-      });
-
-      return {
-        totalChatsInBrowser: models.length,
-        topChats,
-        rajChat: findRaj ? {
-          id: findRaj.id?._serialized,
-          name: findRaj.formattedTitle || findRaj.name,
-          t: findRaj.t,
-          pin: findRaj.pin || findRaj.pinned,
-          allKeys: Object.keys(findRaj).slice(0, 30),
-          lastReceivedKey: findRaj.lastReceivedKey,
-          msgsLength: findRaj.msgs ? findRaj.msgs.length : 0
-        } : null
-      };
-    });
-
-    const safeChats = await whatsappService.getSafeChatList();
-    const findRajInSafe = safeChats.find(c => (c.name || '').toLowerCase().includes('raj') || (c.id || '').includes('273370457321715'));
-    const find987 = safeChats.find(c => (c.name || '').includes('98796') || (c.id || '').includes('37414299017312'));
-
-    return res.json({
-      success: true,
-      safeChatsCount: safeChats.length,
-      findRajInSafe,
-      find987,
-      top5Safe: safeChats.slice(0, 5)
-    });
+    const safeChats = await service.getSafeChatList();
+    return res.json({ success: true, safeChatsCount: safeChats.length, top5Safe: safeChats.slice(0, 5) });
   } catch (err) {
     return res.status(500).json({ success: false, error: err.message });
   }
@@ -385,72 +353,13 @@ async function debugChats(req, res, next) {
 
 async function debugMsgs(req, res) {
   try {
-    const { jid = '125949949538427@lid' } = req.query;
-    
-    if (!whatsappService.client || !whatsappService.client.pupPage) {
+    const service = await getUserSession(req);
+    const { jid = '' } = req.query;
+    if (!service.client || !service.client.pupPage) {
       return res.json({ success: false, error: 'No pupPage' });
     }
-
-    const diag = await whatsappService.client.pupPage.evaluate(async (targetJid) => {
-      try {
-        const chatCol = window.require ? window.require('WAWebCollections')?.Chat : null;
-        const chat = chatCol?.get ? chatCol.get(targetJid) : null;
-        if (!chat) {
-          const allChats = chatCol?.getModelsArray ? chatCol.getModelsArray() : [];
-          return {
-            error: 'Chat not found in chatCol',
-            sampleIds: allChats.slice(0, 5).map(c => c.id?._serialized || String(c.id))
-          };
-        }
-
-        const msgCol = window.require ? window.require('WAWebCollections')?.Msg : null;
-        const allMsgs = msgCol?.getModelsArray ? msgCol.getModelsArray() : [];
-        const msgsForChat = allMsgs.filter(m => {
-          const from = m.from?._serialized || String(m.from || '');
-          const to = m.to?._serialized || String(m.to || '');
-          return from === targetJid || to === targetJid || (m.id && String(m.id).includes(targetJid));
-        });
-
-        let loadEarlierErr = null;
-        let loadedMessagesCount = 0;
-        let msgs = [];
-
-        try {
-          const chat = await window.WWebJS.getChat(targetJid, { getAsModel: false });
-          if (chat) {
-            msgs = chat.msgs ? (chat.msgs.getModelsArray ? chat.msgs.getModelsArray() : (chat.msgs.models || [])) : [];
-            const loader = window.require ? window.require('WAWebChatLoadMessages') : null;
-            if (loader && loader.loadEarlierMsgs) {
-              const loaded = await loader.loadEarlierMsgs({ chat });
-              loadedMessagesCount = loaded ? loaded.length : 0;
-              msgs = chat.msgs ? (chat.msgs.getModelsArray ? chat.msgs.getModelsArray() : (chat.msgs.models || [])) : msgs;
-            }
-          }
-        } catch (e) {
-          loadEarlierErr = e.message || String(e);
-        }
-
-        return {
-          chatFound: true,
-          loadedMessagesCount,
-          loadEarlierErr,
-          totalMsgs: msgs.length,
-          sample: msgs.slice(-5).map(m => ({
-            rawId: m.id,
-            idType: typeof m.id,
-            idKeys: m.id ? Object.keys(m.id) : null,
-            fromMe: m.fromMe || m.id?.fromMe,
-            t: m.t,
-            type: m.type,
-            body: typeof m.body === 'string' ? m.body.slice(0, 150) : m.body
-          }))
-        };
-      } catch (err) {
-        return { evalError: err.message, stack: err.stack };
-      }
-    }, jid);
-
-    return res.json({ success: true, jid, diag });
+    const msgs = await service.fetchMessagesForChat(jid, 20);
+    return res.json({ success: true, jid, count: msgs.length, msgs: msgs.slice(-5) });
   } catch (err) {
     return res.status(500).json({ success: false, error: err.message });
   }
@@ -458,50 +367,35 @@ async function debugMsgs(req, res) {
 
 async function syncChatMessages(req, res) {
   try {
-    const { convId = 15 } = req.query;
-    const [convRows] = await pool.execute('SELECT id, customer_id FROM conversations WHERE id = ?', [convId]);
-    if (convRows.length === 0) return res.status(404).json({ success: false, message: 'Conversation not found' });
+    const service = await getUserSession(req);
+    const userId = req.user.id;
+    const { convId = 1 } = req.query;
+    const [convRows] = await pool.execute('SELECT id, customer_id FROM conversations WHERE id = ? AND user_id = ?', [convId, userId]);
+    if (convRows.length === 0) return res.status(404).json({ success: false, message: 'Conversation not found for this user' });
     const conversation = convRows[0];
-
     const [custRows] = await pool.execute('SELECT id, whatsapp_jid FROM customers WHERE id = ?', [conversation.customer_id]);
     if (custRows.length === 0 || !custRows[0].whatsapp_jid) {
       return res.status(400).json({ success: false, message: 'Customer has no whatsapp_jid' });
     }
-
     const jid = custRows[0].whatsapp_jid;
-    const liveMsgs = await whatsappService.fetchMessagesForChat(jid, 60);
-
+    const liveMsgs = await service.fetchMessagesForChat(jid, 60);
     let inserted = 0;
     for (const m of liveMsgs) {
       const iso = new Date(m.timestamp * 1000).toISOString().slice(0, 19).replace('T', ' ');
       const dir = m.fromMe ? 'outgoing' : 'incoming';
       const safeMsgId = m.id ? String(m.id).slice(0, 191) : `wa_${m.timestamp}_${dir}`;
       if (safeMsgId) {
-        const [exist] = await pool.execute('SELECT id FROM messages WHERE whatsapp_message_id = ? LIMIT 1', [safeMsgId]);
+        const [exist] = await pool.execute('SELECT id FROM messages WHERE whatsapp_message_id = ? AND user_id = ? LIMIT 1', [safeMsgId, userId]);
         if (exist.length === 0) {
           await pool.execute(
-            `INSERT INTO messages (conversation_id, customer_id, direction, message, whatsapp_message_id, message_type, status, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-            [convId, conversation.customer_id, dir, m.body || '', safeMsgId, m.type || 'text', m.status || 'delivered', iso]
+            `INSERT INTO messages (conversation_id, customer_id, direction, message, whatsapp_message_id, message_type, status, created_at, user_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [convId, conversation.customer_id, dir, m.body || '', safeMsgId, m.type || 'text', m.status || 'delivered', iso, userId]
           );
           inserted++;
         }
       }
     }
-
-    const [messages] = await pool.execute(
-      'SELECT id, direction, message, created_at, whatsapp_message_id FROM messages WHERE conversation_id = ? ORDER BY created_at ASC',
-      [convId]
-    );
-
-    return res.json({
-      success: true,
-      convId,
-      liveCount: liveMsgs.length,
-      inserted,
-      totalInDb: messages.length,
-      messages: messages.slice(-10)
-    });
+    return res.json({ success: true, convId, liveCount: liveMsgs.length, inserted });
   } catch (err) {
     return res.status(500).json({ success: false, error: err.message });
   }
@@ -510,6 +404,7 @@ async function syncChatMessages(req, res) {
 module.exports = {
   getStatus,
   getQr,
+  getCallLogs,
   inspectQrPage,
   restartSession,
   syncChats,

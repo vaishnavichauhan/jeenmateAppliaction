@@ -5,6 +5,7 @@ const authMiddleware = require('../middlewares/authMiddleware');
 
 router.get('/', authMiddleware, taskController.getTasks);
 router.post('/', authMiddleware, taskController.createTask);
+router.patch('/:id/assign', authMiddleware, taskController.assignTask);
 router.patch('/:id/toggle', authMiddleware, taskController.toggleTask);
 router.delete('/:id', authMiddleware, taskController.deleteTask);
 

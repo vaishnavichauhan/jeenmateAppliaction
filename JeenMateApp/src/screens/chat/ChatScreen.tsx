@@ -3,6 +3,7 @@ import {
   View,
   Text,
   FlatList,
+  ScrollView,
   TouchableOpacity,
   StyleSheet,
   RefreshControl,
@@ -17,7 +18,8 @@ import { useNavigation, useFocusEffect } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useChatStore, Conversation } from '../../store/chatStore';
 import { useWhatsAppStore } from '../../store/whatsappStore';
-import { useTaskStore } from '../../store/taskStore';
+import { useTaskStore, TeamMember } from '../../store/taskStore';
+import { useAuthStore } from '../../store/authStore';
 import { COLORS, SPACING, RADIUS } from '../../constants/theme';
 import { Icon } from '../../components/common/Icon';
 
@@ -132,16 +134,47 @@ export const ChatScreen: React.FC = () => {
   };
 
   // CRM Task Modal
-  const { addTask } = useTaskStore();
+  const { addTask, teamMembers, fetchTeamMembers } = useTaskStore();
+  const { user } = useAuthStore();
   const [taskModalVisible, setTaskModalVisible] = useState(false);
   const [selectedConv, setSelectedConv] = useState<Conversation | null>(null);
   const [staffNote, setStaffNote] = useState('');
-  const [taskTime, setTaskTime] = useState('10:00 AM');
-  const [dueDate, setDueDate] = useState(
-    new Date(Date.now() + 24 * 3600 * 1000).toISOString().split('T')[0]
-  );
+
+  const getTodayDateStr = () => {
+    const now = new Date();
+    const day = String(now.getDate()).padStart(2, '0');
+    const month = String(now.getMonth() + 1).padStart(2, '0');
+    const year = now.getFullYear();
+    return `${day}/${month}/${year}`;
+  };
+
+  const getCurrentTimeStr = () => {
+    const now = new Date();
+    let hours = now.getHours();
+    const minutes = String(now.getMinutes()).padStart(2, '0');
+    const ampm = hours >= 12 ? 'pm' : 'am';
+    hours = hours % 12;
+    hours = hours ? hours : 12;
+    return `${hours}:${minutes} ${ampm}`;
+  };
+
+  const [taskTime, setTaskTime] = useState(getCurrentTimeStr());
+  const [dueDate, setDueDate] = useState(getTodayDateStr());
+  const [assignedUser, setAssignedUser] = useState<TeamMember | null>(null);
+
+  const availableAssignMembers = teamMembers.filter((m) => {
+    if (user) {
+      if (user.id && String(m.id) === String(user.id)) return false;
+      if (user.email && m.email && m.email.toLowerCase() === user.email.toLowerCase()) return false;
+    }
+    return true;
+  });
 
   const handleOpenTaskModalForConv = (conv: Conversation) => {
+    fetchTeamMembers();
+    setAssignedUser(null);
+    setDueDate(getTodayDateStr());
+    setTaskTime(getCurrentTimeStr());
     setSelectedConv(conv);
     setStaffNote(`Follow up on chat with ${conv.customer_name}`);
     setTaskModalVisible(true);
@@ -149,14 +182,17 @@ export const ChatScreen: React.FC = () => {
 
   const handleSaveTask = async () => {
     if (!selectedConv) return;
+    const combinedDue = taskTime?.trim() ? `${dueDate.trim()} ${taskTime.trim()}` : dueDate.trim();
     await addTask({
       customerId: selectedConv.id,
       customerName: selectedConv.customer_name,
       customerPhone: selectedConv.phone_number,
       originalMessage: selectedConv.last_message || 'WhatsApp Chat',
       staffNote: staffNote,
-      dueDate: dueDate,
+      dueDate: combinedDue,
+      assignedToUserId: assignedUser ? assignedUser.id : null,
     });
+    setAssignedUser(null);
     setTaskModalVisible(false);
     Alert.alert('Task Created 📌', `CRM task added for ${selectedConv.customer_name}.`);
   };
@@ -344,7 +380,7 @@ export const ChatScreen: React.FC = () => {
             </View>
 
             {selectedConv && (
-              <>
+              <ScrollView style={{ maxHeight: 460 }} showsVerticalScrollIndicator={false}>
                 <View style={styles.formGroup}>
                   <Text style={styles.formLabel}>Customer</Text>
                   <Text style={styles.readOnlyCustomer}>
@@ -375,7 +411,7 @@ export const ChatScreen: React.FC = () => {
                     style={styles.formInput}
                     value={dueDate}
                     onChangeText={setDueDate}
-                    placeholder="YYYY-MM-DD"
+                    placeholder="DD/MM/YYYY"
                     placeholderTextColor={COLORS.textSubtle}
                   />
                 </View>
@@ -386,15 +422,58 @@ export const ChatScreen: React.FC = () => {
                     style={styles.formInput}
                     value={taskTime}
                     onChangeText={setTaskTime}
-                    placeholder="10:00 AM"
+                    placeholder="6:48 pm"
                     placeholderTextColor={COLORS.textSubtle}
                   />
+                </View>
+
+                {/* Assign Task To */}
+                <View style={styles.formGroup}>
+                  <Text style={styles.formLabel}>Assign Task To</Text>
+                  <View style={styles.assignChipsContainer}>
+                    <TouchableOpacity
+                      style={[styles.assignChip, !assignedUser && styles.assignChipActive]}
+                      onPress={() => setAssignedUser(null)}
+                      activeOpacity={0.7}
+                    >
+                      <Text style={[styles.assignChipText, !assignedUser && styles.assignChipTextActive]}>
+                        Unassigned
+                      </Text>
+                      {!assignedUser ? (
+                        <Icon name="check" size={12} color={COLORS.primary} strokeWidth={3} />
+                      ) : null}
+                    </TouchableOpacity>
+
+                    {availableAssignMembers.map((member) => {
+                      const isSelected = assignedUser?.id === member.id;
+                      return (
+                        <TouchableOpacity
+                          key={member.id}
+                          style={[styles.assignChip, isSelected && styles.assignChipActive]}
+                          onPress={() => setAssignedUser(member)}
+                          activeOpacity={0.7}
+                        >
+                          <View style={[styles.chipAvatar, isSelected && styles.chipAvatarActive]}>
+                            <Text style={[styles.chipAvatarText, isSelected && styles.chipAvatarTextActive]}>
+                              {(member.name || 'U').charAt(0).toUpperCase()}
+                            </Text>
+                          </View>
+                          <Text style={[styles.assignChipText, isSelected && styles.assignChipTextActive]}>
+                            {member.name}
+                          </Text>
+                          {isSelected ? (
+                            <Icon name="check" size={12} color={COLORS.primary} strokeWidth={3} />
+                          ) : null}
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </View>
                 </View>
 
                 <TouchableOpacity style={styles.modalSubmitBtn} onPress={handleSaveTask}>
                   <Text style={styles.modalSubmitText}>Save</Text>
                 </TouchableOpacity>
-              </>
+              </ScrollView>
             )}
           </View>
         </View>
@@ -734,5 +813,54 @@ const styles = StyleSheet.create({
     color: COLORS.bgWhite,
     fontSize: 15,
     fontWeight: '700',
+  },
+  assignChipsContainer: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginTop: 4,
+  },
+  assignChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: RADIUS.full,
+    backgroundColor: COLORS.inputBg,
+    borderWidth: 1,
+    borderColor: COLORS.borderColor,
+  },
+  assignChipActive: {
+    backgroundColor: '#EFF6FF',
+    borderColor: COLORS.primary,
+  },
+  assignChipText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: COLORS.textDark,
+  },
+  assignChipTextActive: {
+    color: COLORS.primary,
+    fontWeight: '700',
+  },
+  chipAvatar: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: COLORS.textMuted,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  chipAvatarActive: {
+    backgroundColor: COLORS.primary,
+  },
+  chipAvatarText: {
+    color: COLORS.bgWhite,
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  chipAvatarTextActive: {
+    color: COLORS.bgWhite,
   },
 });

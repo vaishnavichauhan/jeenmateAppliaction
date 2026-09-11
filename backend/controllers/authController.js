@@ -3,6 +3,7 @@ const bcrypt = require('bcryptjs');
 const { User } = require('../models');
 const config = require('../config/env');
 
+
 async function login(req, res, next) {
   try {
     const { email, password } = req.body;
@@ -65,7 +66,91 @@ async function getMe(req, res, next) {
   }
 }
 
+async function createUser(req, res, next) {
+  try {
+    const { name, email, password, role } = req.body;
+
+    if (!name || !email || !password) {
+      return res.status(400).json({
+        success: false,
+        message: 'Please provide name, email and password.'
+      });
+    }
+
+    const validRoles = ['admin', 'user'];
+    const assignedRole = validRoles.includes(role) ? role : 'user';
+
+    // Check if email already exists
+    const existing = await User.findByEmail(email.trim().toLowerCase());
+    if (existing) {
+      return res.status(409).json({
+        success: false,
+        message: 'A user with this email already exists.'
+      });
+    }
+
+    const hashedPassword = bcrypt.hashSync(password, 10);
+    const newUser = await User.create({
+      name: name.trim(),
+      email: email.trim().toLowerCase(),
+      password: hashedPassword,
+      role: assignedRole,
+    });
+
+    return res.status(201).json({
+      success: true,
+      message: 'User created successfully.',
+      user: {
+        id: newUser.id,
+        name: newUser.name,
+        email: newUser.email,
+        role: newUser.role,
+      }
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function logout(req, res, next) {
+  try {
+    const userId = req.user && req.user.id;
+    if (userId) {
+      console.log(`[Auth] Logging out user ${userId} (${req.user.email}). Expiring WhatsApp session...`);
+      const sessionManager = require('../services/sessionManager');
+      await sessionManager.destroySession(userId);
+    }
+    return res.status(200).json({
+      success: true,
+      message: 'Logged out successfully. WhatsApp session expired.'
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function getAllUsers(req, res, next) {
+  try {
+    const users = await User.findAll();
+    return res.status(200).json({
+      success: true,
+      data: users.map(u => ({
+        id: u.id,
+        name: u.name,
+        email: u.email,
+        role: u.role,
+        avatar: `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(u.name)}`
+      }))
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
 module.exports = {
   login,
-  getMe
+  getMe,
+  createUser,
+  logout,
+  getAllUsers
 };

@@ -6,6 +6,7 @@ import { useAuthStore } from '../store/authStore';
 import { LoginScreen } from '../screens/auth/LoginScreen';
 import { BottomTabNavigator } from './BottomTabNavigator';
 import { ChatDetailScreen } from '../screens/chat/ChatDetailScreen';
+import { CreateUserScreen } from '../screens/admin/CreateUserScreen';
 import { COLORS } from '../constants/theme';
 
 const Stack = createNativeStackNavigator();
@@ -52,6 +53,14 @@ export const RootNavigator: React.FC = () => {
               component={ChatDetailScreen}
               options={{
                 headerShown: false,
+              }}
+            />
+            <Stack.Screen
+              name="CreateUser"
+              component={CreateUserScreen}
+              options={{
+                headerShown: false,
+                animation: 'slide_from_right',
               }}
             />
           </>

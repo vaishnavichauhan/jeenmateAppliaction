@@ -17,6 +17,7 @@ export interface WhatsAppSessionState {
   regenerateQr: () => Promise<void>;
   resetSession: () => Promise<{ success: boolean; message: string }>;
   getQrPageUrl: () => string;
+  resetLocalState: () => void;
 }
 
 export const useWhatsAppStore = create<WhatsAppSessionState>((set, get) => ({
@@ -104,7 +105,20 @@ export const useWhatsAppStore = create<WhatsAppSessionState>((set, get) => ({
   },
 
   getQrPageUrl: () => {
-    const { serverUrl } = useAuthStore.getState();
-    return `${serverUrl}/api/whatsapp/qr-page`;
+    const { serverUrl, token } = useAuthStore.getState();
+    return `${serverUrl}/api/whatsapp/qr-page?token=${encodeURIComponent(token || '')}`;
+  },
+
+  resetLocalState: () => {
+    set({
+      isConnected: false,
+      status: 'waiting',
+      phone: null,
+      name: null,
+      qrDataUrl: null,
+      lastUpdated: null,
+      isLoading: false,
+      isResetting: false,
+    });
   },
 }));

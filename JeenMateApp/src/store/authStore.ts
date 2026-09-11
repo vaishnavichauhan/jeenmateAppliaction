@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import axios from 'axios';
+import { Platform } from 'react-native';
 
 export interface StaffUser {
   id: string;
@@ -23,6 +24,12 @@ interface AuthState {
   logout: () => Promise<void>;
   setServerUrl: (url: string) => Promise<void>;
   testServerConnection: (testUrl?: string) => Promise<{ success: boolean; message: string }>;
+  createUser: (
+    name: string,
+    email: string,
+    password: string,
+    role: string
+  ) => Promise<{ success: boolean; message?: string }>;
 }
 
 const STORAGE_KEYS = {
@@ -31,7 +38,7 @@ const STORAGE_KEYS = {
   SERVER_URL: '@jeenmate_server_url',
 };
 
-const DEFAULT_SERVER_URL = 'http://192.168.1.9:5001';
+const DEFAULT_SERVER_URL = Platform.OS === 'android' ? 'http://192.168.1.3:5001' : 'http://localhost:5001';
 
 export const useAuthStore = create<AuthState>((set, get) => ({
   token: null,
@@ -50,7 +57,12 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         AsyncStorage.getItem(STORAGE_KEYS.SERVER_URL),
       ]);
 
-      const serverUrl = savedUrl || DEFAULT_SERVER_URL;
+      let serverUrl = savedUrl || DEFAULT_SERVER_URL;
+      if (serverUrl.includes('192.168.1.9')) {
+        serverUrl = DEFAULT_SERVER_URL;
+        await AsyncStorage.setItem(STORAGE_KEYS.SERVER_URL, serverUrl);
+      }
+
       const token = savedToken;
       const user = savedUser ? JSON.parse(savedUser) : null;
 
@@ -137,14 +149,52 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
 
   logout: async () => {
+    const { token, serverUrl } = get();
+
+    // 1. Tell backend to destroy and expire the WhatsApp session for this user
+    if (token) {
+      try {
+        await axios.post(
+          `${serverUrl}/api/auth/logout`,
+          {},
+          {
+            headers: { Authorization: `Bearer ${token}` },
+            timeout: 5000,
+          }
+        );
+      } catch (err: any) {
+        console.log('[AuthStore] Backend logout notification error:', err?.message);
+      }
+    }
+
+    // 2. Clear local storage caches
     try {
       await Promise.all([
         AsyncStorage.removeItem(STORAGE_KEYS.TOKEN),
         AsyncStorage.removeItem(STORAGE_KEYS.USER),
+        AsyncStorage.removeItem('@jeenmate_conversations_cache_v2'),
+        AsyncStorage.removeItem('@jeenmate_tasks_cache'),
       ]);
     } catch (e) {
       console.warn('Error during logout storage clear', e);
     }
+
+    // 3. Reset local WhatsApp and Chat stores
+    try {
+      const { useWhatsAppStore } = require('./whatsappStore');
+      useWhatsAppStore.getState().resetLocalState?.();
+    } catch (e) {}
+
+    try {
+      const { useChatStore } = require('./chatStore');
+      useChatStore.setState({ conversations: [], activeConversation: null, messages: [] });
+    } catch (e) {}
+
+    try {
+      const { useTaskStore } = require('./taskStore');
+      useTaskStore.getState().resetTasks?.();
+    } catch (e) {}
+
     set({
       token: null,
       user: null,
@@ -171,6 +221,38 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         success: false,
         message: err.code === 'ECONNABORTED' ? 'Connection timed out' : err.message || 'Cannot reach server',
       };
+    }
+  },
+
+  createUser: async (name, email, password, role) => {
+    const { serverUrl, token } = get();
+
+    // Offline fallback — demo mode
+    if (token === 'demo_offline_jwt_token_jeenmate') {
+      return {
+        success: false,
+        message: 'Cannot create users in offline demo mode. Please connect to the backend server.',
+      };
+    }
+
+    try {
+      const response = await axios.post(
+        `${serverUrl}/api/auth/users`,
+        { name, email, password, role },
+        {
+          timeout: 8000,
+          headers: { Authorization: `Bearer ${token}` },
+        }
+      );
+      if (response.data && response.data.success) {
+        return { success: true, message: response.data.message };
+      }
+      return { success: false, message: response.data?.message || 'User creation failed.' };
+    } catch (err: any) {
+      const msg =
+        err.response?.data?.message ||
+        (err.code === 'ECONNABORTED' ? 'Request timed out.' : err.message || 'Unable to connect.');
+      return { success: false, message: msg };
     }
   },
 }));

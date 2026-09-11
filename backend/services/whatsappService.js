@@ -8,7 +8,11 @@ const socketService = require('./socketService');
 const { Conversation, Message } = require('../models');
 
 class WhatsAppService {
-  constructor() {
+  /**
+   * @param {number} userId - The DB user id this session belongs to.
+   */
+  constructor(userId) {
+    this.userId = userId;
     this.client = null;
     this.status = 'offline'; // 'offline' | 'waiting' | 'online'
     this.isConnected = false;
@@ -52,12 +56,13 @@ class WhatsAppService {
     console.log('[WhatsApp] Initializing WhatsApp Web Client...');
 
     try {
-      const sessionDir = path.join(config.WHATSAPP_SESSION_PATH, `session-${config.WHATSAPP_CLIENT_ID}`);
+      const clientId = `user-${this.userId}`;
+      const sessionDir = path.join(config.WHATSAPP_SESSION_PATH, `session-${clientId}`);
       this.cleanSingletonLocks(sessionDir);
 
       const executablePath = this.getExecutablePath();
-      console.log(`[WhatsApp] Using Chrome executable: ${executablePath || 'Puppeteer default'}`);
-      console.log(`[WhatsApp] Using Session Path: ${config.WHATSAPP_SESSION_PATH}, ClientId: ${config.WHATSAPP_CLIENT_ID}`);
+      console.log(`[WhatsApp:${this.userId}] Using Chrome executable: ${executablePath || 'Puppeteer default'}`);
+      console.log(`[WhatsApp:${this.userId}] Session path: ${sessionDir}`);
 
       if (!fs.existsSync(config.WHATSAPP_SESSION_PATH)) {
         fs.mkdirSync(config.WHATSAPP_SESSION_PATH, { recursive: true });
@@ -83,7 +88,7 @@ class WhatsAppService {
       this.client = new Client({
         authStrategy: new LocalAuth({
           dataPath: config.WHATSAPP_SESSION_PATH,
-          clientId: config.WHATSAPP_CLIENT_ID
+          clientId: `user-${this.userId}`
         }),
         puppeteer: puppeteerOptions
       });
@@ -119,10 +124,7 @@ class WhatsAppService {
 
     // QR Event
     this.client.on('qr', async (qr) => {
-      console.log('\n======================================================');
-      console.log('  [WhatsApp] SCAN QR CODE TO LINK WHATSAPP:');
-      console.log('  Open WhatsApp > Settings > Linked Devices > Link a Device');
-      console.log('======================================================\n');
+      console.log(`\n[WhatsApp:${this.userId}] QR ready — user must scan to link WhatsApp.`);
       try {
         qrcode.toString(qr, { type: 'terminal', small: true }, (err, str) => {
           if (!err && str) {
@@ -159,14 +161,25 @@ class WhatsAppService {
     });
 
     // Authenticated Event
-    this.client.on('authenticated', () => {
-      console.log('[WhatsApp] Client Authenticated.');
+    this.client.on('authenticated', async () => {
+      console.log(`[WhatsApp:${this.userId}] Authenticated.`);
       this.status = 'online';
       this.isConnected = true;
       this.latestQrString = null;
       this.latestQrDataUrl = null;
       this.lastUpdated = new Date().toISOString();
       this.broadcastCurrentStatus();
+
+      // Dismiss any 'What's new' or 'Continue' dialogs automatically
+      if (this.client && this.client.pupPage) {
+        try {
+          await this.client.pupPage.evaluate(() => {
+            const btns = Array.from(document.querySelectorAll('button, div[role="button"]'));
+            const continueBtn = btns.find(b => b.textContent && b.textContent.trim().toLowerCase() === 'continue');
+            if (continueBtn) continueBtn.click();
+          }).catch(() => {});
+        } catch (_) {}
+      }
     });
 
     // Auth Failure Event
@@ -179,7 +192,7 @@ class WhatsAppService {
 
     // Ready Event
     this.client.on('ready', () => {
-      console.log('[WhatsApp] Client is Ready!');
+      console.log(`[WhatsApp:${this.userId}] Client Ready!`);
       this.status = 'online';
       this.isConnected = true;
       this.latestQrString = null;
@@ -193,18 +206,17 @@ class WhatsAppService {
 
       this.broadcastCurrentStatus();
 
-      // Trigger automatic background sync of chats
+      // Auto-sync chats for this user
       setTimeout(() => {
-        console.log('[WhatsApp] Auto-syncing chats from active session...');
         this.syncChats({ cleanOld: false }).catch(err => {
-          console.error('[WhatsApp] Auto-sync error:', err.message);
+          console.error(`[WhatsApp:${this.userId}] Auto-sync error:`, err.message);
         });
       }, 2000);
     });
 
     // Disconnected Event
     this.client.on('disconnected', (reason) => {
-      console.log('[WhatsApp] Client was logged out or disconnected:', reason);
+      console.log(`[WhatsApp:${this.userId}] Disconnected:`, reason);
       this.status = 'offline';
       this.isConnected = false;
       this.botPhone = null;
@@ -219,6 +231,38 @@ class WhatsAppService {
         await this.handleIncomingMessage(msg);
       } catch (err) {
         console.error('[WhatsApp] Error handling message_create:', err);
+      }
+    });
+
+    // Call Event (catches incoming, outgoing, voice & video calls)
+    this.client.on('call', async (call) => {
+      try {
+        console.log('[WhatsApp] Live Call event:', call);
+        const fromMe = !!call.fromMe;
+        const targetJid = fromMe ? call.to : call.from;
+        if (!targetJid) return;
+
+        const rawNumber = targetJid.replace('@c.us', '').replace('@lid', '');
+        const phoneNumber = rawNumber.startsWith('+') ? rawNumber : `+${rawNumber}`;
+        const mediaType = call.isVideo ? 'video' : 'voice';
+        const callType = fromMe ? 'outgoing' : (call.isMissed ? 'missed' : 'incoming');
+
+        let customerName = phoneNumber;
+        try {
+          const contact = await call.getContact();
+          if (contact && (contact.name || contact.pushname)) {
+            customerName = contact.name || contact.pushname;
+          }
+        } catch (_) {}
+
+        await pool.execute(
+          `INSERT INTO whatsapp_calls (call_id, phone_number, customer_name, call_type, media_type, created_at, user_id)
+           VALUES (?, ?, ?, ?, ?, NOW(), ?)`,
+          [call.id || `call_${Date.now()}`, phoneNumber, customerName, callType, mediaType, this.userId]
+        );
+        console.log(`[WhatsApp:${this.userId}] Saved call log: ${callType} ${mediaType} call for ${customerName}`);
+      } catch (err) {
+        console.error('[WhatsApp] Error handling call event:', err.message);
       }
     });
   }
@@ -246,11 +290,13 @@ class WhatsAppService {
       }
     } catch (e) {}
 
-    // Find or create customer in MySQL
+    const userId = this.userId;
+
+    // Find or create customer in MySQL (scoped to this user)
     let customerId = null;
     const [custRows] = await pool.execute(
-      'SELECT id, name FROM customers WHERE phone_number = ? OR whatsapp_jid = ? LIMIT 1',
-      [phoneNumber, targetJid]
+      'SELECT id, name FROM customers WHERE user_id = ? AND (phone_number = ? OR whatsapp_jid = ?) LIMIT 1',
+      [userId, phoneNumber, targetJid]
     );
 
     if (custRows.length > 0) {
@@ -260,17 +306,17 @@ class WhatsAppService {
       }
     } else {
       const [insertCust] = await pool.execute(
-        'INSERT INTO customers (phone_number, name, whatsapp_jid) VALUES (?, ?, ?)',
-        [phoneNumber, contactName, targetJid]
+        'INSERT INTO customers (phone_number, name, whatsapp_jid, user_id) VALUES (?, ?, ?, ?)',
+        [phoneNumber, contactName, targetJid, userId]
       );
       customerId = insertCust.insertId;
     }
 
-    // Find or create conversation in MySQL
+    // Find or create conversation in MySQL (scoped to this user)
     let convId = null;
     const [convRows] = await pool.execute(
-      'SELECT id, unread_count FROM conversations WHERE customer_id = ? LIMIT 1',
-      [customerId]
+      'SELECT id, unread_count FROM conversations WHERE customer_id = ? AND user_id = ? LIMIT 1',
+      [customerId, userId]
     );
 
     const msgTime = (msg.timestamp && typeof msg.timestamp === 'number') ? msg.timestamp * 1000 : Date.now();
@@ -285,8 +331,8 @@ class WhatsAppService {
       );
     } else {
       const [insertConv] = await pool.execute(
-        'INSERT INTO conversations (customer_id, status, last_message_at, unread_count) VALUES (?, "open", ?, ?)',
-        [customerId, utcStr, unreadIncrement]
+        'INSERT INTO conversations (customer_id, status, last_message_at, unread_count, user_id) VALUES (?, "open", ?, ?, ?)',
+        [customerId, utcStr, unreadIncrement, userId]
       );
       convId = insertConv.insertId;
     }
@@ -315,9 +361,9 @@ class WhatsAppService {
     }
 
     const [insertMsg] = await pool.execute(
-      `INSERT INTO messages (conversation_id, customer_id, direction, message, whatsapp_message_id, message_type, status, created_at)
-       VALUES (?, ?, ?, ?, ?, 'text', 'delivered', ?)`,
-      [convId, customerId, direction, safeText, safeMsgId, utcStr]
+      `INSERT INTO messages (conversation_id, customer_id, direction, message, whatsapp_message_id, message_type, status, created_at, user_id)
+       VALUES (?, ?, ?, ?, ?, 'text', 'delivered', ?, ?)`,
+      [convId, customerId, direction, safeText, safeMsgId, utcStr, userId]
     );
 
     const savedMsg = await Message.findById(insertMsg.insertId);
@@ -376,7 +422,7 @@ class WhatsAppService {
   }
 
   async restart(clean = false) {
-    console.log(`[WhatsApp] Restarting session (clean=${clean})...`);
+    console.log(`[WhatsApp:${this.userId}] Restarting session (clean=${clean})...`);
     try {
       if (this.client) {
         await this.client.destroy().catch(() => {});
@@ -390,9 +436,9 @@ class WhatsAppService {
       this.botPhone = null;
       this.botName = null;
 
-      const sessionFolder = path.join(config.WHATSAPP_SESSION_PATH, `session-${config.WHATSAPP_CLIENT_ID}`);
+      const sessionFolder = path.join(config.WHATSAPP_SESSION_PATH, `session-user-${this.userId}`);
       if (clean && fs.existsSync(sessionFolder)) {
-        console.log('[WhatsApp] Clearing session folder:', sessionFolder);
+        console.log(`[WhatsApp:${this.userId}] Clearing session folder:`, sessionFolder);
         fs.rmSync(sessionFolder, { recursive: true, force: true });
       }
 
@@ -400,8 +446,43 @@ class WhatsAppService {
       await this.initialize();
       return { success: true, message: 'Session restarted successfully.' };
     } catch (err) {
-      console.error('[WhatsApp] Restart error:', err);
+      console.error(`[WhatsApp:${this.userId}] Restart error:`, err);
       return { success: false, error: err.message };
+    }
+  }
+
+  /**
+   * Fully destroy this session — kills Chrome and deletes session folder.
+   * Called by SessionManager on user logout.
+   */
+  async destroy() {
+    console.log(`[WhatsApp:${this.userId}] Destroying session...`);
+    try {
+      if (this.client) {
+        await this.client.destroy().catch(() => {});
+        this.client = null;
+      }
+    } catch (e) {}
+
+    // Give Chrome 500ms to completely release file locks before deleting session folder
+    await new Promise((resolve) => setTimeout(resolve, 500));
+
+    this.status = 'offline';
+    this.isConnected = false;
+    this.latestQrString = null;
+    this.latestQrDataUrl = null;
+    this.botPhone = null;
+    this.botName = null;
+
+    // Delete session folder so user must re-scan on next login
+    const sessionFolder = path.join(config.WHATSAPP_SESSION_PATH, `session-user-${this.userId}`);
+    if (fs.existsSync(sessionFolder)) {
+      try {
+        fs.rmSync(sessionFolder, { recursive: true, force: true });
+        console.log(`[WhatsApp:${this.userId}] Session folder deleted.`);
+      } catch (rmErr) {
+        console.warn(`[WhatsApp:${this.userId}] Error deleting session folder:`, rmErr.message);
+      }
     }
   }
 
@@ -723,9 +804,10 @@ class WhatsAppService {
           ? new Date(timestampSeconds * 1000).toISOString().slice(0, 19).replace('T', ' ')
           : '2000-01-01 00:00:00';
 
-        // 1. Upsert Customer safely
+        // 1. Upsert Customer safely (scoped to this user)
+        const userId = this.userId;
         let customerId = null;
-        const [byJid] = await pool.execute('SELECT id FROM customers WHERE whatsapp_jid = ? LIMIT 1', [jid]);
+        const [byJid] = await pool.execute('SELECT id FROM customers WHERE user_id = ? AND whatsapp_jid = ? LIMIT 1', [userId, jid]);
         if (byJid.length > 0) {
           customerId = byJid[0].id;
           try {
@@ -734,21 +816,21 @@ class WhatsAppService {
             await pool.execute('UPDATE customers SET name = ? WHERE id = ?', [name, customerId]);
           }
         } else {
-          const [byPhone] = await pool.execute('SELECT id FROM customers WHERE phone_number = ? LIMIT 1', [phone]);
+          const [byPhone] = await pool.execute('SELECT id FROM customers WHERE user_id = ? AND phone_number = ? LIMIT 1', [userId, phone]);
           if (byPhone.length > 0) {
             customerId = byPhone[0].id;
             await pool.execute('UPDATE customers SET name = ?, whatsapp_jid = ? WHERE id = ?', [name, jid, customerId]);
           } else {
             try {
               const [insCust] = await pool.execute(
-                'INSERT INTO customers (name, phone_number, whatsapp_jid) VALUES (?, ?, ?)',
-                [name, phone, jid]
+                'INSERT INTO customers (name, phone_number, whatsapp_jid, user_id) VALUES (?, ?, ?, ?)',
+                [name, phone, jid, userId]
               );
               customerId = insCust.insertId;
             } catch (dupErr) {
               const [fallback] = await pool.execute(
-                'SELECT id FROM customers WHERE whatsapp_jid = ? OR phone_number = ? LIMIT 1',
-                [jid, phone]
+                'SELECT id FROM customers WHERE user_id = ? AND (whatsapp_jid = ? OR phone_number = ?) LIMIT 1',
+                [userId, jid, phone]
               );
               if (fallback.length > 0) {
                 customerId = fallback[0].id;
@@ -759,11 +841,11 @@ class WhatsAppService {
         }
         if (!customerId) continue;
 
-        // 2. Upsert Conversation
+        // 2. Upsert Conversation (scoped to this user)
         let convId;
         const [existingConv] = await pool.execute(
-          'SELECT id FROM conversations WHERE customer_id = ? LIMIT 1',
-          [customerId]
+          'SELECT id FROM conversations WHERE customer_id = ? AND user_id = ? LIMIT 1',
+          [customerId, userId]
         );
 
         const isPinned = chat.pinned ? 1 : 0;
@@ -777,8 +859,8 @@ class WhatsAppService {
           );
         } else {
           const [insConv] = await pool.execute(
-            'INSERT INTO conversations (customer_id, status, last_message_at, unread_count, is_pinned) VALUES (?, "open", ?, ?, ?)',
-            [customerId, isoDate, unread, isPinned]
+            'INSERT INTO conversations (customer_id, status, last_message_at, unread_count, is_pinned, user_id) VALUES (?, "open", ?, ?, ?, ?)',
+            [customerId, isoDate, unread, isPinned, userId]
           );
           convId = insConv.insertId;
         }
@@ -850,6 +932,126 @@ class WhatsAppService {
     }
   }
 
+  async syncWhatsAppCallsFromBrowser() {
+    if (!this.client || !this.client.pupPage) return;
+
+    try {
+      const browserCalls = await this.client.pupPage.evaluate(async () => {
+        try {
+          const callCollection = window.require ? window.require('WAWebCollections')?.Call : null;
+          const models = callCollection?.getModelsArray ? callCollection.getModelsArray() : (window.Store?.Call?.models || []);
+          
+          const results = [];
+          if (models && models.length > 0) {
+            models.forEach(c => {
+              const peerJid = c.peerJid?._serialized || c.peerJid || c.id?._serialized || String(c.id || '');
+              results.push({
+                callId: c.id?._serialized || String(c.id || Date.now()),
+                peerJid,
+                isVideo: !!c.isVideo,
+                outgoing: !!c.outgoing,
+                isMissed: !!(c.isMissed || c.callResult === 1 || c.webCallResult === 'MISSED'),
+                timestamp: c.offerTime || c.t || Math.floor(Date.now() / 1000),
+                duration: c.duration || null
+              });
+            });
+          }
+
+          // Also scan Msg collection for call_log messages
+          const msgCol = window.require ? window.require('WAWebCollections')?.Msg : null;
+          const allMsgs = msgCol?.getModelsArray ? msgCol.getModelsArray() : (window.Store?.Msg?.models || []);
+          const callMsgs = allMsgs.filter(m => m.type === 'call_log');
+
+          callMsgs.forEach(m => {
+            const isFromMe = !!(m.id?.fromMe || m.fromMe);
+            const targetJid = m.from?._serialized || m.to?._serialized || String(m.from || m.to || '');
+            results.push({
+              callId: m.id?._serialized || `msg_call_${m.t}`,
+              peerJid: targetJid,
+              isVideo: m.subtype === 'video' || m.isVideo || false,
+              outgoing: isFromMe,
+              isMissed: m.subtype === 'missed' || (typeof m.body === 'string' && m.body.toLowerCase().includes('missed')),
+              timestamp: m.t || Math.floor(Date.now() / 1000),
+              duration: m.duration || null
+            });
+          });
+
+          return results;
+        } catch (err) {
+          return { evalError: err.message || String(err) };
+        }
+      });
+
+      if (Array.isArray(browserCalls) && browserCalls.length > 0) {
+        for (const c of browserCalls) {
+          if (!c.peerJid || c.peerJid.includes('@g.us')) continue;
+
+          const rawNumber = c.peerJid.replace('@c.us', '').replace('@lid', '');
+          const phoneNumber = rawNumber.startsWith('+') ? rawNumber : `+${rawNumber}`;
+          const mediaType = c.isVideo ? 'video' : 'voice';
+          const callType = c.outgoing ? 'outgoing' : (c.isMissed ? 'missed' : 'incoming');
+          const callId = String(c.callId).slice(0, 100);
+
+          let tsSeconds = typeof c.timestamp === 'number' ? c.timestamp : parseInt(c.timestamp, 10);
+          if (tsSeconds > 1e11) {
+            tsSeconds = Math.floor(tsSeconds / 1000);
+          }
+          const isoDate = new Date(tsSeconds * 1000).toISOString().slice(0, 19).replace('T', ' ');
+
+          const [exist] = await pool.execute(
+            'SELECT id FROM whatsapp_calls WHERE user_id = ? AND (call_id = ? OR (phone_number = ? AND created_at = ?)) LIMIT 1',
+            [this.userId, callId, phoneNumber, isoDate]
+          );
+
+          if (exist.length === 0) {
+            let customerName = phoneNumber;
+            const [cust] = await pool.execute(
+              'SELECT name FROM customers WHERE (phone_number = ? OR whatsapp_jid = ?) AND (user_id = ? OR user_id IS NULL) LIMIT 1',
+              [phoneNumber, c.peerJid, this.userId]
+            );
+            if (cust.length > 0 && cust[0].name) {
+              customerName = cust[0].name;
+            }
+
+            await pool.execute(
+              `INSERT INTO whatsapp_calls (call_id, phone_number, customer_name, call_type, media_type, duration, created_at, user_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+              [callId, phoneNumber, customerName, callType, mediaType, c.duration ? `${c.duration}s` : null, isoDate, this.userId]
+            );
+          }
+        }
+      }
+    } catch (err) {
+      console.warn(`[WhatsApp:${this.userId}] syncWhatsAppCallsFromBrowser error:`, err.message);
+    }
+  }
+
+  async getCallLogs(limit = 50) {
+    try {
+      await this.syncWhatsAppCallsFromBrowser();
+      const [rows] = await pool.execute(
+        `SELECT 
+          id,
+          call_id as callId,
+          customer_name as customerName,
+          phone_number as phoneNumber,
+          call_type as callType,
+          media_type as mediaType,
+          duration,
+          DATE_FORMAT(created_at, '%Y-%m-%dT%H:%i:%s.000Z') as timestamp
+         FROM whatsapp_calls
+         WHERE user_id = ?
+         ORDER BY created_at DESC, id DESC
+         LIMIT ${parseInt(limit, 10) || 50}`,
+        [this.userId]
+      );
+      return rows;
+    } catch (err) {
+      console.error(`[WhatsApp:${this.userId}] Error getting call logs:`, err.message);
+      return [];
+    }
+  }
+
   getStatus() {
     return {
       isConnected: this.isConnected,
@@ -880,9 +1082,10 @@ class WhatsAppService {
 
   broadcastCurrentStatus() {
     const statusData = this.getStatus();
-    socketService.broadcastWhatsAppStatus(statusData);
+    // Broadcast with userId so frontend can filter events for this user
+    socketService.broadcastWhatsAppStatus({ ...statusData, userId: this.userId });
   }
 }
 
-const whatsappService = new WhatsAppService();
-module.exports = whatsappService;
+// Export the CLASS (not a singleton) — each user gets their own instance via sessionManager
+module.exports = WhatsAppService;

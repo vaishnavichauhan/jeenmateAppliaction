@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   View,
   Text,
@@ -9,12 +9,20 @@ import {
   TextInput,
   Modal,
   Alert,
+  Platform,
+  ActivityIndicator,
+  RefreshControl,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useNavigation } from '@react-navigation/native';
+import { useNavigation, useFocusEffect } from '@react-navigation/native';
 import { COLORS, SPACING, RADIUS } from '../../constants/theme';
 import { Icon } from '../../components/common/Icon';
-import { useTaskStore } from '../../store/taskStore';
+import { useTaskStore, TeamMember } from '../../store/taskStore';
+import { useAuthStore } from '../../store/authStore';
+import apiClient from '../../services/api';
+import {
+  fetchAndroidCallLogs,
+} from '../../services/callLogService';
 
 export interface CallLogItem {
   id: string;
@@ -27,154 +35,238 @@ export interface CallLogItem {
   avatar?: string;
 }
 
-const SAMPLE_WHATSAPP_CALLS: CallLogItem[] = [
-  {
-    id: 'wa_call_1',
-    customerName: 'Raj Patel ( Jeenweb )',
-    phoneNumber: '+918799350736',
-    callType: 'incoming',
-    mediaType: 'voice',
-    timestamp: 'Today, 5:10 PM',
-    duration: '3m 45s',
-  },
-  {
-    id: 'wa_call_2',
-    customerName: 'Vaishnavi Shah',
-    phoneNumber: '+919316539751',
-    callType: 'outgoing',
-    mediaType: 'video',
-    timestamp: 'Today, 4:25 PM',
-    duration: '5m 12s',
-  },
-  {
-    id: 'wa_call_3',
-    customerName: 'Shubham Software',
-    phoneNumber: '+918849139833',
-    callType: 'missed',
-    mediaType: 'voice',
-    timestamp: 'Today, 2:15 PM',
-  },
-  {
-    id: 'wa_call_4',
-    customerName: 'Orsang Camp Admin',
-    phoneNumber: '+919879611490',
-    callType: 'outgoing',
-    mediaType: 'voice',
-    timestamp: 'Yesterday, 6:40 PM',
-    duration: '8m 20s',
-  },
-  {
-    id: 'wa_call_5',
-    customerName: 'Jeen Web Office',
-    phoneNumber: '+919510972299',
-    callType: 'incoming',
-    mediaType: 'voice',
-    timestamp: 'Yesterday, 11:30 AM',
-    duration: '2m 10s',
-  },
-];
+/**
+ * Robustly parses a timestamp string or number into a standard JavaScript Date.
+ * Handles ISO strings ("2026-09-11 10:45:00"), Epoch milliseconds/seconds,
+ * and relative string fallbacks ("Today, 10:45 AM").
+ */
+const parseCallDate = (rawTs: string | number): Date => {
+  if (!rawTs) return new Date(0);
+  if (typeof rawTs === 'number') {
+    return rawTs > 1e11 ? new Date(rawTs) : new Date(rawTs * 1000);
+  }
 
-const SAMPLE_PHONE_CALLS: CallLogItem[] = [
-  {
-    id: 'ph_call_1',
-    customerName: 'Raj Patel ( Jeenweb )',
-    phoneNumber: '+918799350736',
-    callType: 'outgoing',
-    mediaType: 'voice',
-    timestamp: 'Today, 4:50 PM',
-    duration: '1m 30s',
-  },
-  {
-    id: 'ph_call_2',
-    customerName: 'Snehal Mam',
-    phoneNumber: '+919112013911',
-    callType: 'incoming',
-    mediaType: 'voice',
-    timestamp: 'Today, 3:10 PM',
-    duration: '4m 05s',
-  },
-  {
-    id: 'ph_call_3',
-    customerName: 'Marketing Jeenweb',
-    phoneNumber: '+918799092907',
-    callType: 'missed',
-    mediaType: 'voice',
-    timestamp: 'Today, 1:05 PM',
-  },
-  {
-    id: 'ph_call_4',
-    customerName: 'Shah Tatvam',
-    phoneNumber: '+919824466017',
-    callType: 'outgoing',
-    mediaType: 'voice',
-    timestamp: 'Yesterday, 5:15 PM',
-    duration: '6m 50s',
-  },
-  {
-    id: 'ph_call_5',
-    customerName: 'Aditya Jeenweb',
-    phoneNumber: '+919512605989',
-    callType: 'incoming',
-    mediaType: 'voice',
-    timestamp: 'Yesterday, 10:15 AM',
-    duration: '1m 45s',
-  },
-];
+  const str = String(rawTs).trim();
+
+  // If string contains only numbers (unix timestamp)
+  if (/^\d+$/.test(str)) {
+    const num = parseInt(str, 10);
+    return str.length === 10 ? new Date(num * 1000) : new Date(num);
+  }
+
+  // Handle SQL datetime ("YYYY-MM-DD HH:mm:ss") -> convert to ISO UTC ("YYYY-MM-DDTHH:mm:ss.000Z")
+  let normalized = str;
+  if (/^\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}:\d{2}/.test(normalized)) {
+    normalized = normalized.replace(' ', 'T') + '.000Z';
+  } else if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/.test(normalized)) {
+    normalized = normalized + '.000Z';
+  }
+
+  const d = new Date(normalized);
+  if (!isNaN(d.getTime()) && d.getTime() > 0) return d;
+
+  // Fallback: extract unix timestamp from string like "msg_call_1789109485"
+  const matchMsgTs = str.match(/17\d{8,11}/);
+  if (matchMsgTs) {
+    const num = parseInt(matchMsgTs[0], 10);
+    return matchMsgTs[0].length === 10 ? new Date(num * 1000) : new Date(num);
+  }
+
+  // Relative string fallbacks ("Today, 10:45 AM", "Yesterday, 8:20 PM")
+  const now = new Date();
+  if (normalized.toLowerCase().includes('today')) {
+    const timePart = normalized.split(',')[1] || normalized.replace(/today/i, '');
+    const parsedTime = new Date(`${now.toDateString()} ${timePart.trim()}`);
+    if (!isNaN(parsedTime.getTime())) return parsedTime;
+  } else if (normalized.toLowerCase().includes('yesterday')) {
+    const yesterday = new Date(now);
+    yesterday.setDate(yesterday.getDate() - 1);
+    const timePart = normalized.split(',')[1] || normalized.replace(/yesterday/i, '');
+    const parsedTime = new Date(`${yesterday.toDateString()} ${timePart.trim()}`);
+    if (!isNaN(parsedTime.getTime())) return parsedTime;
+  }
+
+  return new Date(0);
+};
+
+/**
+ * Formats a Date object to 12-hour time string ("10:45 AM", "03:30 PM").
+ */
+const formatCallTime = (d: Date, rawFallback: string): string => {
+  if (isNaN(d.getTime()) || d.getTime() === 0) return rawFallback || '';
+  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true });
+};
+
+/**
+ * Returns date section title ("Today", "Yesterday", Day name e.g. "Tuesday", or "05 Sep 2026").
+ */
+const getDateCategory = (d: Date): string => {
+  if (isNaN(d.getTime()) || d.getTime() === 0) return 'Older Calls';
+
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const target = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+
+  const diffTime = today.getTime() - target.getTime();
+  const diffDays = Math.round(diffTime / (1000 * 3600 * 24));
+
+  if (diffDays === 0) return 'Today';
+  if (diffDays === 1) return 'Yesterday';
+
+  if (diffDays > 1 && diffDays < 7) {
+    const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+    return dayNames[d.getDay()];
+  }
+
+  const day = String(d.getDate()).padStart(2, '0');
+  const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const month = monthNames[d.getMonth()];
+  const year = d.getFullYear();
+  return `${day} ${month} ${year}`;
+};
+
+interface CallSection {
+  title: string;
+  data: CallLogItem[];
+}
 
 export const CallsScreen: React.FC = () => {
   const navigation = useNavigation<any>();
   const insets = useSafeAreaInsets();
-  const { addTask } = useTaskStore();
+  const { addTask, teamMembers, fetchTeamMembers } = useTaskStore();
+  const { user } = useAuthStore();
 
   const [activeTab, setActiveTab] = useState<'whatsapp' | 'phone'>('whatsapp');
   const [searchQuery, setSearchQuery] = useState('');
+
+  // Call Logs state
+  const [realPhoneCalls, setRealPhoneCalls] = useState<CallLogItem[]>([]);
+  const [liveWhatsAppCalls, setLiveWhatsAppCalls] = useState<CallLogItem[]>([]);
+  const [isSyncingCalls, setIsSyncingCalls] = useState<boolean>(false);
+  const [isFetchingWACalls, setIsFetchingWACalls] = useState<boolean>(false);
 
   // CRM Task Modal
   const [taskModalVisible, setTaskModalVisible] = useState(false);
   const [selectedCall, setSelectedCall] = useState<CallLogItem | null>(null);
   const [staffNote, setStaffNote] = useState('');
-  const [taskTime, setTaskTime] = useState('10:00 AM');
-  const [dueDate, setDueDate] = useState(
-    new Date(Date.now() + 24 * 3600 * 1000).toISOString().split('T')[0]
+
+  const getTodayDateStr = () => {
+    const now = new Date();
+    const day = String(now.getDate()).padStart(2, '0');
+    const month = String(now.getMonth() + 1).padStart(2, '0');
+    const year = now.getFullYear();
+    return `${day}/${month}/${year}`;
+  };
+
+  const getCurrentTimeStr = () => {
+    const now = new Date();
+    let hours = now.getHours();
+    const minutes = String(now.getMinutes()).padStart(2, '0');
+    const ampm = hours >= 12 ? 'pm' : 'am';
+    hours = hours % 12;
+    hours = hours ? hours : 12;
+    return `${hours}:${minutes} ${ampm}`;
+  };
+
+  const [taskTime, setTaskTime] = useState(getCurrentTimeStr());
+  const [dueDate, setDueDate] = useState(getTodayDateStr());
+  const [assignedUser, setAssignedUser] = useState<TeamMember | null>(null);
+
+  const availableAssignMembers = teamMembers.filter((m) => {
+    if (user) {
+      if (user.id && String(m.id) === String(user.id)) return false;
+      if (user.email && m.email && m.email.toLowerCase() === user.email.toLowerCase()) return false;
+    }
+    return true;
+  });
+
+  const loadWhatsAppCalls = async () => {
+    setIsFetchingWACalls(true);
+    try {
+      const res = await apiClient.get('/api/whatsapp/call-logs');
+      if (res.data && res.data.success && Array.isArray(res.data.data)) {
+        const formatted: CallLogItem[] = res.data.data.map((item: any) => ({
+          id: `wa_call_${item.id || item.callId}`,
+          customerName: item.customerName || item.phoneNumber || 'Customer',
+          phoneNumber: item.phoneNumber || '',
+          callType: (item.callType || 'incoming').toLowerCase(),
+          mediaType: item.mediaType || 'voice',
+          timestamp: item.timestamp,
+          duration: item.duration || undefined,
+        }));
+        setLiveWhatsAppCalls(formatted);
+      }
+    } catch (e) {
+      console.log('[CallsScreen] Error loading WhatsApp calls from API');
+    } finally {
+      setIsFetchingWACalls(false);
+    }
+  };
+
+  const loadRealAndroidCalls = async () => {
+    if (Platform.OS !== 'android') return;
+    setIsSyncingCalls(true);
+    try {
+      const logs = await fetchAndroidCallLogs(60);
+      if (logs && logs.length > 0) {
+        setRealPhoneCalls(logs);
+      }
+    } catch (e) {
+      console.warn('Call logs fetch warning:', e);
+    } finally {
+      setIsSyncingCalls(false);
+    }
+  };
+
+  useEffect(() => {
+    loadWhatsAppCalls();
+    if (Platform.OS === 'android') {
+      loadRealAndroidCalls();
+    }
+  }, []);
+
+  useFocusEffect(
+    useCallback(() => {
+      loadWhatsAppCalls();
+      if (Platform.OS === 'android') {
+        loadRealAndroidCalls();
+      }
+    }, [])
   );
 
-  const handleOpenWhatsAppCall = (phoneNumber: string) => {
-    const cleanPhone = phoneNumber.replace(/[^0-9]/g, '');
-    const waUrl = `https://wa.me/${cleanPhone}`;
-    Linking.canOpenURL(waUrl).then((supported) => {
-      if (supported) {
-        Linking.openURL(waUrl);
-      } else {
-        Linking.openURL(`tel:${phoneNumber}`);
-      }
-    });
-  };
-
-  const handleOpenCellularCall = (phoneNumber: string) => {
-    Linking.openURL(`tel:${phoneNumber}`);
-  };
-
   const handleOpenTaskModal = (call: CallLogItem) => {
+    fetchTeamMembers();
+    setAssignedUser(null);
+    setDueDate(getTodayDateStr());
+    setTaskTime(getCurrentTimeStr());
     setSelectedCall(call);
+    const parsedDate = parseCallDate(call.timestamp);
+    const timeStr = formatCallTime(parsedDate, call.timestamp);
     setStaffNote(`Follow up call with ${call.customerName} (${call.phoneNumber})`);
     setTaskModalVisible(true);
   };
 
   const handleSaveTask = async () => {
     if (!selectedCall) return;
+    const parsedDate = parseCallDate(selectedCall.timestamp);
+    const timeStr = formatCallTime(parsedDate, selectedCall.timestamp);
+    const combinedDue = taskTime?.trim() ? `${dueDate.trim()} ${taskTime.trim()}` : dueDate.trim();
+
     await addTask({
       customerId: selectedCall.id,
       customerName: selectedCall.customerName,
       customerPhone: selectedCall.phoneNumber,
-      originalMessage: `Call Log [${selectedCall.mediaType.toUpperCase()}]: ${selectedCall.callType} call at ${selectedCall.timestamp}${selectedCall.duration ? ` (${selectedCall.duration})` : ''}`,
+      originalMessage: `Call Log [${selectedCall.mediaType.toUpperCase()}]: ${selectedCall.callType} call at ${timeStr}${selectedCall.duration ? ` (Duration: ${selectedCall.duration})` : ''}`,
       staffNote: staffNote,
-      dueDate: dueDate,
+      dueDate: combinedDue,
+      assignedToUserId: assignedUser ? assignedUser.id : null,
     });
+    setAssignedUser(null);
     setTaskModalVisible(false);
     Alert.alert('Task Created 📌', `CRM Task scheduled for ${selectedCall.customerName}.`);
   };
 
-  const filterCalls = (calls: CallLogItem[]) => {
+  const filterCalls = (calls: CallLogItem[]): CallLogItem[] => {
     if (!searchQuery.trim()) return calls;
     const q = searchQuery.toLowerCase();
     return calls.filter(
@@ -185,12 +277,52 @@ export const CallsScreen: React.FC = () => {
     );
   };
 
-  const filteredWhatsApp = filterCalls(SAMPLE_WHATSAPP_CALLS);
-  const filteredPhone = filterCalls(SAMPLE_PHONE_CALLS);
+  /**
+   * Sort calls strictly chronologically (newest at top, oldest at bottom)
+   * and group into date sections ("Today", "Yesterday", "DD MMM YYYY").
+   */
+  const getSortedAndGroupedSections = (rawList: CallLogItem[]): { sections: CallSection[]; newestId?: string } => {
+    const filtered = filterCalls(rawList);
 
-  const renderCallCardItem = (item: CallLogItem, isWhatsApp: boolean) => {
+    // 1. Sort strictly descending by exact timestamp
+    const sorted = [...filtered].sort((a, b) => {
+      const timeA = parseCallDate(a.timestamp).getTime();
+      const timeB = parseCallDate(b.timestamp).getTime();
+      return timeB - timeA;
+    });
+
+    const newestId = sorted.length > 0 ? sorted[0].id : undefined;
+
+    // 2. Group into sections maintaining descending date order
+    const sectionMap = new Map<string, CallLogItem[]>();
+
+    sorted.forEach((call) => {
+      const callDate = parseCallDate(call.timestamp);
+      const category = getDateCategory(callDate);
+      if (!sectionMap.has(category)) {
+        sectionMap.set(category, []);
+      }
+      sectionMap.get(category)!.push(call);
+    });
+
+    const sections: CallSection[] = [];
+    sectionMap.forEach((data, title) => {
+      sections.push({ title, data });
+    });
+
+    return { sections, newestId };
+  };
+
+  const waGrouped = getSortedAndGroupedSections(liveWhatsAppCalls);
+  const phoneGrouped = getSortedAndGroupedSections(realPhoneCalls);
+
+  const renderCallCardItem = (item: CallLogItem, isWhatsApp: boolean, isNewest: boolean) => {
     const isMissed = item.callType === 'missed';
     const isIncoming = item.callType === 'incoming';
+    const isOutgoing = item.callType === 'outgoing';
+
+    const parsedDate = parseCallDate(item.timestamp);
+    const displayTime = formatCallTime(parsedDate, item.timestamp);
 
     const initials = item.customerName
       ? item.customerName
@@ -202,7 +334,13 @@ export const CallsScreen: React.FC = () => {
       : 'C';
 
     return (
-      <View key={item.id} style={styles.callItemCard}>
+      <View
+        key={item.id}
+        style={[
+          styles.callItemCard,
+          isNewest && styles.newestCallCardHighlight,
+        ]}
+      >
         {/* Top Info Row */}
         <View style={styles.itemHeaderRow}>
           {/* Avatar & Customer */}
@@ -237,16 +375,23 @@ export const CallsScreen: React.FC = () => {
             </View>
 
             <View style={styles.userTextContainer}>
-              <Text style={styles.itemCustomerName} numberOfLines={1}>
-                {item.customerName}
-              </Text>
+              <View style={styles.nameRow}>
+                <Text style={styles.itemCustomerName} numberOfLines={1}>
+                  {item.customerName}
+                </Text>
+                {isNewest && (
+                  <View style={styles.latestBadgePill}>
+                    <Text style={styles.latestBadgeText}>LATEST</Text>
+                  </View>
+                )}
+              </View>
               <Text style={styles.itemPhoneText}>{item.phoneNumber}</Text>
             </View>
           </View>
 
           {/* Time & Media Type */}
           <View style={styles.timeCol}>
-            <Text style={styles.itemTimeText}>{item.timestamp}</Text>
+            <Text style={styles.itemTimeText}>{displayTime || item.timestamp}</Text>
             {isWhatsApp && item.mediaType === 'video' ? (
               <View style={styles.videoBadge}>
                 <Text style={styles.videoBadgeText}>🎥 Video</Text>
@@ -257,39 +402,46 @@ export const CallsScreen: React.FC = () => {
 
         {/* Bottom Meta & Action Bar */}
         <View style={styles.itemFooterRow}>
-          {/* Status Badge */}
-          <View
-            style={[
-              styles.statusPill,
-              isMissed
-                ? styles.pillMissed
-                : isIncoming
-                ? styles.pillIncoming
-                : styles.pillOutgoing,
-            ]}
-          >
-            <Text
+          {/* Status Badge with Visual Indicators */}
+          <View style={styles.statusPillGroup}>
+            <View
               style={[
-                styles.statusPillText,
+                styles.statusPill,
                 isMissed
-                  ? styles.pillTextMissed
+                  ? styles.pillMissed
                   : isIncoming
-                  ? styles.pillTextIncoming
-                  : styles.pillTextOutgoing,
+                  ? styles.pillIncoming
+                  : styles.pillOutgoing,
               ]}
             >
-              {isMissed
-                ? '✕ Missed Call'
-                : isIncoming
-                ? '↙ Incoming'
-                : '↗ Outgoing'}
-              {item.duration ? ` • ${item.duration}` : ''}
-            </Text>
+              <Text
+                style={[
+                  styles.statusPillText,
+                  isMissed
+                    ? styles.pillTextMissed
+                    : isIncoming
+                    ? styles.pillTextIncoming
+                    : styles.pillTextOutgoing,
+                ]}
+              >
+                {isMissed
+                  ? '↙ Missed call'
+                  : isIncoming
+                  ? '↓ Incoming call'
+                  : '↑ Outgoing call'}
+              </Text>
+            </View>
+
+            {/* Duration Display (Only if available in fetched data) */}
+            {item.duration && item.duration.trim() !== '' ? (
+              <View style={styles.durationBadge}>
+                <Text style={styles.durationText}>Duration: {item.duration}</Text>
+              </View>
+            ) : null}
           </View>
 
           {/* Action Buttons */}
           <View style={styles.actionButtonsRow}>
-            {/* Task Action Button */}
             <TouchableOpacity
               style={styles.taskBtnPill}
               onPress={() => handleOpenTaskModal(item)}
@@ -324,7 +476,7 @@ export const CallsScreen: React.FC = () => {
           <Icon name="search" size={16} color={COLORS.textMuted} />
           <TextInput
             style={styles.searchInput}
-            placeholder="Search by customer name, phone, time..."
+            placeholder="Search by contact name, phone, date..."
             placeholderTextColor={COLORS.textSubtle}
             value={searchQuery}
             onChangeText={setSearchQuery}
@@ -346,7 +498,7 @@ export const CallsScreen: React.FC = () => {
                 activeTab === 'whatsapp' && styles.tabSegmentTextActiveWA,
               ]}
             >
-              WhatsApp Calls 🟢 ({SAMPLE_WHATSAPP_CALLS.length})
+              WhatsApp Calls 🟢 ({liveWhatsAppCalls.length})
             </Text>
           </TouchableOpacity>
 
@@ -363,7 +515,7 @@ export const CallsScreen: React.FC = () => {
                 activeTab === 'phone' && styles.tabSegmentTextActivePhone,
               ]}
             >
-              Phone Calls 📞 ({SAMPLE_PHONE_CALLS.length})
+              Phone Calls 📞 ({realPhoneCalls.length})
             </Text>
           </TouchableOpacity>
         </View>
@@ -372,27 +524,93 @@ export const CallsScreen: React.FC = () => {
       <ScrollView
         contentContainerStyle={styles.scrollContent}
         showsVerticalScrollIndicator={false}
+        refreshControl={
+          activeTab === 'phone' && Platform.OS === 'android' ? (
+            <RefreshControl
+              refreshing={isSyncingCalls}
+              onRefresh={loadRealAndroidCalls}
+              colors={[COLORS.primary]}
+            />
+          ) : activeTab === 'whatsapp' ? (
+            <RefreshControl
+              refreshing={isFetchingWACalls}
+              onRefresh={loadWhatsAppCalls}
+              colors={[COLORS.primary]}
+            />
+          ) : undefined
+        }
       >
         {/* WHATSAPP CALLS LIST */}
         {activeTab === 'whatsapp' && (
-          filteredWhatsApp.length === 0 ? (
+          waGrouped.sections.length === 0 ? (
             <View style={styles.emptyBox}>
-              <Text style={styles.emptyText}>No WhatsApp calls found.</Text>
+              <Text style={styles.emptyTitleText}>No Data</Text>
+              <Text style={styles.emptyText}>No WhatsApp call history recorded</Text>
             </View>
           ) : (
-            filteredWhatsApp.map((item) => renderCallCardItem(item, true))
+            waGrouped.sections.map((section) => (
+              <View key={`wa_sec_${section.title}`} style={styles.sectionContainer}>
+                <View style={styles.sectionHeaderRow}>
+                  <Text style={styles.sectionHeaderText}>{section.title}</Text>
+                  <View style={styles.sectionHeaderDivider} />
+                </View>
+                {section.data.map((item) =>
+                  renderCallCardItem(item, true, item.id === waGrouped.newestId)
+                )}
+              </View>
+            ))
           )
         )}
 
         {/* CELLULAR PHONE CALLS LIST */}
         {activeTab === 'phone' && (
-          filteredPhone.length === 0 ? (
-            <View style={styles.emptyBox}>
-              <Text style={styles.emptyText}>No Cellular phone calls found.</Text>
-            </View>
-          ) : (
-            filteredPhone.map((item) => renderCallCardItem(item, false))
-          )
+          <>
+            {Platform.OS === 'android' && (
+              <View style={styles.syncBannerCard}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.syncBannerTitle}>Android Device Call Logs</Text>
+                  <Text style={styles.syncBannerSub}>
+                    {realPhoneCalls.length > 0
+                      ? `Synced ${realPhoneCalls.length} real call logs directly from device`
+                      : 'Tap button to sync real call history from your Android phone'}
+                  </Text>
+                </View>
+                <TouchableOpacity
+                  style={styles.syncBannerBtn}
+                  onPress={loadRealAndroidCalls}
+                  disabled={isSyncingCalls}
+                  activeOpacity={0.8}
+                >
+                  {isSyncingCalls ? (
+                    <ActivityIndicator size="small" color={COLORS.bgWhite} />
+                  ) : (
+                    <Text style={styles.syncBannerBtnText}>
+                      {realPhoneCalls.length > 0 ? 'Sync Logs' : 'Grant Permission'}
+                    </Text>
+                  )}
+                </TouchableOpacity>
+              </View>
+            )}
+
+            {phoneGrouped.sections.length === 0 ? (
+              <View style={styles.emptyBox}>
+                <Text style={styles.emptyTitleText}>No Data</Text>
+                <Text style={styles.emptyText}>No phone call history found</Text>
+              </View>
+            ) : (
+              phoneGrouped.sections.map((section) => (
+                <View key={`phone_sec_${section.title}`} style={styles.sectionContainer}>
+                  <View style={styles.sectionHeaderRow}>
+                    <Text style={styles.sectionHeaderText}>{section.title}</Text>
+                    <View style={styles.sectionHeaderDivider} />
+                  </View>
+                  {section.data.map((item) =>
+                    renderCallCardItem(item, false, item.id === phoneGrouped.newestId)
+                  )}
+                </View>
+              ))
+            )}
+          </>
         )}
       </ScrollView>
 
@@ -413,7 +631,7 @@ export const CallsScreen: React.FC = () => {
             </View>
 
             {selectedCall && (
-              <>
+              <ScrollView style={{ maxHeight: 460 }} showsVerticalScrollIndicator={false}>
                 <View style={styles.formGroup}>
                   <Text style={styles.formLabel}>Customer</Text>
                   <Text style={styles.readOnlyCustomer}>
@@ -425,8 +643,9 @@ export const CallsScreen: React.FC = () => {
                   <Text style={styles.formLabel}>Call Event</Text>
                   <View style={styles.quoteBoxModal}>
                     <Text style={styles.quoteBoxText}>
-                      {selectedCall.callType.toUpperCase()} Call at {selectedCall.timestamp}
-                      {selectedCall.duration ? ` (${selectedCall.duration})` : ''}
+                      {selectedCall.callType.toUpperCase()} Call at{' '}
+                      {formatCallTime(parseCallDate(selectedCall.timestamp), selectedCall.timestamp)}
+                      {selectedCall.duration ? ` (Duration: ${selectedCall.duration})` : ''}
                     </Text>
                   </View>
                 </View>
@@ -447,7 +666,7 @@ export const CallsScreen: React.FC = () => {
                     style={styles.formInput}
                     value={dueDate}
                     onChangeText={setDueDate}
-                    placeholder="YYYY-MM-DD"
+                    placeholder="DD/MM/YYYY"
                     placeholderTextColor={COLORS.textSubtle}
                   />
                 </View>
@@ -458,15 +677,58 @@ export const CallsScreen: React.FC = () => {
                     style={styles.formInput}
                     value={taskTime}
                     onChangeText={setTaskTime}
-                    placeholder="10:00 AM"
+                    placeholder="6:48 pm"
                     placeholderTextColor={COLORS.textSubtle}
                   />
+                </View>
+
+                {/* Assign Task To */}
+                <View style={styles.formGroup}>
+                  <Text style={styles.formLabel}>Assign Task To</Text>
+                  <View style={styles.assignChipsContainer}>
+                    <TouchableOpacity
+                      style={[styles.assignChip, !assignedUser && styles.assignChipActive]}
+                      onPress={() => setAssignedUser(null)}
+                      activeOpacity={0.7}
+                    >
+                      <Text style={[styles.assignChipText, !assignedUser && styles.assignChipTextActive]}>
+                        Unassigned
+                      </Text>
+                      {!assignedUser ? (
+                        <Icon name="check" size={12} color={COLORS.primary} strokeWidth={3} />
+                      ) : null}
+                    </TouchableOpacity>
+
+                    {availableAssignMembers.map((member) => {
+                      const isSelected = assignedUser?.id === member.id;
+                      return (
+                        <TouchableOpacity
+                          key={member.id}
+                          style={[styles.assignChip, isSelected && styles.assignChipActive]}
+                          onPress={() => setAssignedUser(member)}
+                          activeOpacity={0.7}
+                        >
+                          <View style={[styles.chipAvatar, isSelected && styles.chipAvatarActive]}>
+                            <Text style={[styles.chipAvatarText, isSelected && styles.chipAvatarTextActive]}>
+                              {(member.name || 'U').charAt(0).toUpperCase()}
+                            </Text>
+                          </View>
+                          <Text style={[styles.assignChipText, isSelected && styles.assignChipTextActive]}>
+                            {member.name}
+                          </Text>
+                          {isSelected ? (
+                            <Icon name="check" size={12} color={COLORS.primary} strokeWidth={3} />
+                          ) : null}
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </View>
                 </View>
 
                 <TouchableOpacity style={styles.modalSubmitBtn} onPress={handleSaveTask}>
                   <Text style={styles.modalSubmitText}>Save</Text>
                 </TouchableOpacity>
-              </>
+              </ScrollView>
             )}
           </View>
         </View>
@@ -534,14 +796,6 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     borderRadius: RADIUS.sm,
   },
-  tabSegmentActive: {
-    backgroundColor: COLORS.bgWhite,
-    shadowColor: COLORS.shadowColor,
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.1,
-    shadowRadius: 2,
-    elevation: 1,
-  },
   tabSegmentActiveWA: {
     backgroundColor: '#DCFCE7',
     borderWidth: 1,
@@ -557,10 +811,6 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     color: COLORS.textMuted,
   },
-  tabSegmentTextActive: {
-    color: COLORS.primaryNavy,
-    fontWeight: '800',
-  },
   tabSegmentTextActiveWA: {
     color: '#15803D',
     fontWeight: '800',
@@ -571,106 +821,30 @@ const styles = StyleSheet.create({
   },
   scrollContent: {
     padding: SPACING.md,
-    gap: SPACING.xl,
+    gap: SPACING.lg,
     paddingBottom: SPACING.xxxl,
   },
-  mainCard: {
-    borderRadius: RADIUS.xl,
-    borderWidth: 1.5,
-    backgroundColor: COLORS.bgWhite,
-    overflow: 'hidden',
-    shadowColor: COLORS.shadowColor,
-    shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.08,
-    shadowRadius: 6,
-    elevation: 3,
+  sectionContainer: {
+    gap: 10,
+    marginBottom: 6,
   },
-  cardWhatsApp: {
-    borderColor: '#86EFAC',
-  },
-  cardPhone: {
-    borderColor: '#93C5FD',
-  },
-  cardHeaderBarWA: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: SPACING.lg,
-    paddingVertical: 14,
-    backgroundColor: '#F0FDF4',
-    borderBottomWidth: 1,
-    borderBottomColor: '#DCFCE7',
-  },
-  cardHeaderBarPhone: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: SPACING.lg,
-    paddingVertical: 14,
-    backgroundColor: '#F0F9FF',
-    borderBottomWidth: 1,
-    borderBottomColor: '#DBEAFE',
-  },
-  cardHeaderLeft: {
+  sectionHeaderRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 12,
+    marginTop: 6,
+    marginBottom: 2,
+    gap: 10,
   },
-  headerIconCircleWA: {
-    width: 38,
-    height: 38,
-    borderRadius: 19,
-    backgroundColor: '#DCFCE7',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  headerIconCirclePhone: {
-    width: 38,
-    height: 38,
-    borderRadius: 19,
-    backgroundColor: '#DBEAFE',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  cardMainTitle: {
-    fontSize: 16,
+  sectionHeaderText: {
+    fontSize: 13,
     fontWeight: '800',
     color: COLORS.primaryNavy,
+    letterSpacing: 0.3,
   },
-  cardSubTitle: {
-    fontSize: 11,
-    color: COLORS.textMuted,
-    marginTop: 1,
-  },
-  badgeGreenPill: {
-    backgroundColor: '#DCFCE7',
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: RADIUS.full,
-    borderWidth: 1,
-    borderColor: '#86EFAC',
-  },
-  badgeGreenPillText: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: '#15803D',
-  },
-  badgeNavyPill: {
-    backgroundColor: '#DBEAFE',
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: RADIUS.full,
-    borderWidth: 1,
-    borderColor: '#93C5FD',
-  },
-  badgeNavyPillText: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: '#1E40AF',
-  },
-  cardItemsBody: {
-    padding: SPACING.md,
-    gap: SPACING.md,
+  sectionHeaderDivider: {
+    flex: 1,
+    height: 1,
+    backgroundColor: COLORS.borderColor,
   },
   callItemCard: {
     backgroundColor: COLORS.bgWhite,
@@ -684,6 +858,11 @@ const styles = StyleSheet.create({
     shadowRadius: 2,
     elevation: 1,
   },
+  newestCallCardHighlight: {
+    borderColor: '#86EFAC',
+    borderWidth: 1.5,
+    backgroundColor: '#FAFDFB',
+  },
   itemHeaderRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -695,6 +874,25 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 10,
     flex: 1,
+  },
+  nameRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  latestBadgePill: {
+    backgroundColor: '#DCFCE7',
+    paddingHorizontal: 6,
+    paddingVertical: 1.5,
+    borderRadius: 4,
+    borderWidth: 0.5,
+    borderColor: '#86EFAC',
+  },
+  latestBadgeText: {
+    fontSize: 9,
+    fontWeight: '900',
+    color: '#15803D',
+    letterSpacing: 0.5,
   },
   itemAvatar: {
     width: 42,
@@ -757,9 +955,9 @@ const styles = StyleSheet.create({
     gap: 4,
   },
   itemTimeText: {
-    fontSize: 11,
-    fontWeight: '600',
-    color: COLORS.textMuted,
+    fontSize: 12,
+    fontWeight: '700',
+    color: COLORS.textDark,
   },
   videoBadge: {
     backgroundColor: 'rgba(26, 59, 113, 0.08)',
@@ -780,8 +978,14 @@ const styles = StyleSheet.create({
     borderTopWidth: 1,
     borderTopColor: COLORS.inputBg,
   },
+  statusPillGroup: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    flexWrap: 'wrap',
+  },
   statusPill: {
-    paddingHorizontal: 8,
+    paddingHorizontal: 9,
     paddingVertical: 4,
     borderRadius: RADIUS.full,
   },
@@ -807,29 +1011,21 @@ const styles = StyleSheet.create({
   pillTextMissed: {
     color: '#B91C1C',
   },
+  durationBadge: {
+    backgroundColor: COLORS.inputBg,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: RADIUS.sm,
+  },
+  durationText: {
+    fontSize: 11,
+    color: COLORS.textMuted,
+    fontWeight: '600',
+  },
   actionButtonsRow: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
-  },
-  callBtnPill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: RADIUS.full,
-    gap: 4,
-  },
-  callBtnWA: {
-    backgroundColor: COLORS.whatsappGreen,
-  },
-  callBtnPhone: {
-    backgroundColor: COLORS.primaryNavy,
-  },
-  callBtnText: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: COLORS.bgWhite,
   },
   taskBtnPill: {
     backgroundColor: 'rgba(26, 59, 113, 0.08)',
@@ -845,11 +1041,18 @@ const styles = StyleSheet.create({
     color: COLORS.primary,
   },
   emptyBox: {
-    paddingVertical: 30,
+    paddingVertical: 40,
     alignItems: 'center',
+    justifyContent: 'center',
+  },
+  emptyTitleText: {
+    fontSize: 16,
+    fontWeight: '800',
+    color: COLORS.primaryNavy,
+    marginBottom: 4,
   },
   emptyText: {
-    fontSize: 13,
+    fontSize: 12,
     color: COLORS.textMuted,
   },
   modalOverlay: {
@@ -929,5 +1132,90 @@ const styles = StyleSheet.create({
     color: COLORS.bgWhite,
     fontSize: 15,
     fontWeight: '700',
+  },
+  syncBannerCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: '#EFF6FF',
+    borderRadius: RADIUS.lg,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: '#BFDBFE',
+    gap: 10,
+  },
+  syncBannerTitle: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: '#1E40AF',
+  },
+  syncBannerSub: {
+    fontSize: 11,
+    color: '#3B82F6',
+    marginTop: 2,
+  },
+  syncBannerBtn: {
+    backgroundColor: '#2563EB',
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: RADIUS.sm,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  syncBannerBtnText: {
+    color: COLORS.bgWhite,
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  assignChipsContainer: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginTop: 4,
+  },
+  assignChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: RADIUS.full,
+    backgroundColor: COLORS.inputBg,
+    borderWidth: 1,
+    borderColor: COLORS.borderColor,
+  },
+  assignChipActive: {
+    backgroundColor: '#EFF6FF',
+    borderColor: COLORS.primary,
+  },
+  assignChipText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: COLORS.textDark,
+  },
+  assignChipTextActive: {
+    color: COLORS.primary,
+    fontWeight: '700',
+  },
+  chipAvatar: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: COLORS.textMuted,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  chipAvatarActive: {
+    backgroundColor: COLORS.primary,
+  },
+  chipAvatarText: {
+    color: COLORS.bgWhite,
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  chipAvatarTextActive: {
+    color: COLORS.bgWhite,
   },
 });
