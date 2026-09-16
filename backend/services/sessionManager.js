@@ -59,6 +59,11 @@ class WhatsAppSessionManager {
       this.sessions.delete(userId);
     }
 
+    try {
+      const pool = require('../config/db');
+      await pool.execute('DELETE FROM whatsapp_calls WHERE user_id = ?', [userId]);
+    } catch (_) {}
+
     // Always ensure the session folder on disk is completely erased on logout
     const sessionFolder = path.join(config.WHATSAPP_SESSION_PATH, `session-user-${userId}`);
     for (let i = 0; i < 3; i++) {

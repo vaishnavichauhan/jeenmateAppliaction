@@ -77,6 +77,13 @@ interface TaskState {
 }
 
 const STORAGE_KEY_TASKS = '@jeenmate_tasks_cache';
+const STORAGE_KEY_MEMBERS = '@jeenmate_team_members_cache';
+
+const DEFAULT_MEMBERS: TeamMember[] = [
+  { id: 4, name: 'Nakul', email: 'nakul@jeenmate.com', role: 'user', avatar: 'https://api.dicebear.com/7.x/initials/svg?seed=Nakul' },
+  { id: 1, name: 'Support Admin', email: 'admin@support.com', role: 'admin', avatar: 'https://api.dicebear.com/7.x/initials/svg?seed=Support%20Admin' },
+  { id: 3, name: 'tanamay', email: 'tanamay@jeenmate.com', role: 'user', avatar: 'https://api.dicebear.com/7.x/initials/svg?seed=tanamay' },
+];
 
 export const useTaskStore = create<TaskState>((set, get) => ({
   tasks: [],
@@ -86,7 +93,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
     assigned: 0,
     completed: 0,
   },
-  teamMembers: [],
+  teamMembers: DEFAULT_MEMBERS,
   filter: 'all',
   selectedCustomer: null,
   searchQuery: '',
@@ -94,10 +101,25 @@ export const useTaskStore = create<TaskState>((set, get) => ({
   isRefreshing: false,
 
   fetchTeamMembers: async () => {
+    // 1. Load from cache first if empty
+    if (get().teamMembers.length === 0) {
+      try {
+        const cached = await AsyncStorage.getItem(STORAGE_KEY_MEMBERS);
+        if (cached) {
+          const parsed = JSON.parse(cached);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            set({ teamMembers: parsed });
+          }
+        }
+      } catch (err) {}
+    }
+
+    // 2. Fetch fresh from backend server
     try {
       const res = await apiClient.get('/api/auth/users');
-      if (res.data && res.data.success && Array.isArray(res.data.data)) {
+      if (res.data && res.data.success && Array.isArray(res.data.data) && res.data.data.length > 0) {
         set({ teamMembers: res.data.data });
+        await AsyncStorage.setItem(STORAGE_KEY_MEMBERS, JSON.stringify(res.data.data));
       }
     } catch (e) {
       console.log('[TaskStore] Error fetching team members', e);

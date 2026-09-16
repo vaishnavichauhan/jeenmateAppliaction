@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import {
   View,
   Text,
@@ -11,6 +11,10 @@ import {
   Modal,
   Alert,
   ActivityIndicator,
+  KeyboardAvoidingView,
+  Keyboard,
+  Dimensions,
+  Platform,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useNavigation, useFocusEffect } from '@react-navigation/native';
@@ -57,6 +61,101 @@ export const HomeScreen: React.FC = () => {
     new Date(Date.now() + 24 * 3600 * 1000).toISOString().split('T')[0]
   );
   const [newAssignedUser, setNewAssignedUser] = useState<TeamMember | null>(null);
+  const [newTaskTime, setNewTaskTime] = useState('');
+  const [newAssignDropdownOpen, setNewAssignDropdownOpen] = useState(false);
+  const [isCreatingTask, setIsCreatingTask] = useState(false);
+  const addModalScrollRef = useRef<any>(null);
+  const [addKeyboardHeight, setAddKeyboardHeight] = useState(0);
+
+  // Helper: today's date as DD/MM/YYYY
+  const getTodayDateStr = () => {
+    const now = new Date();
+    const dd = String(now.getDate()).padStart(2, '0');
+    const mm = String(now.getMonth() + 1).padStart(2, '0');
+    const yyyy = now.getFullYear();
+    return `${dd}/${mm}/${yyyy}`;
+  };
+
+  // Helper: current time as h:mmam/pm
+  const getCurrentTimeStr = () => {
+    const now = new Date();
+    const minutes = String(now.getMinutes()).padStart(2, '0');
+    let hours = now.getHours();
+    const ampm = hours >= 12 ? 'pm' : 'am';
+    hours = hours % 12;
+    hours = hours ? hours : 12;
+    return `${hours}:${minutes}${ampm}`;
+  };
+
+  // Helper: parse call event info from original_message
+  const parseCallEventInfo = (originalMessage?: string) => {
+    if (!originalMessage || !originalMessage.trim()) return null;
+    const msg = originalMessage.trim();
+    if (!msg.startsWith('Call Log')) return null;
+
+    const isVideo = msg.includes('[VIDEO]');
+    let eventType = isVideo ? 'Video Call' : 'Phone Call';
+    let eventIcon: 'video' | 'phone' = isVideo ? 'video' : 'phone';
+    let eventColor = '#2563EB';
+
+    const lower = msg.toLowerCase();
+    if (lower.includes('missed call')) {
+      eventType = isVideo ? 'Missed Video Call' : 'Missed Call';
+      eventColor = '#DC2626';
+    } else if (lower.includes('incoming call')) {
+      eventType = isVideo ? 'Incoming Video Call' : 'Incoming Call';
+      eventColor = '#059669';
+    } else if (lower.includes('outgoing call')) {
+      eventType = isVideo ? 'Outgoing Video Call' : 'Outgoing Call';
+      eventColor = '#2563EB';
+    }
+
+    const timeMatch = msg.match(/at\s+(?:[0-9]{1,2}:[a-zA-Z]+,\s*)?([0-9]{1,2}:[0-9]{2}\s*(?:am|pm)?)/i);
+    const callTime = timeMatch ? timeMatch[1] : null;
+
+    const dateMatch = msg.match(/at\s+([0-9]{1,2}:[a-zA-Z]+)/i);
+    const callDate = dateMatch ? dateMatch[1].replace(':', ' ') : null;
+
+    const durationMatch = msg.match(/\(duration\s+([^)]+)\)/i);
+    const duration = durationMatch ? durationMatch[1] : null;
+
+    return {
+      eventType,
+      eventIcon,
+      eventColor,
+      callTime,
+      callDate,
+      duration,
+    };
+  };
+
+  // Helper: separate date and time from due_date string (e.g. "16/09/2026 3:55pm")
+  const parseDueDateAndTime = (dueStr?: string) => {
+    if (!dueStr) return { date: null, time: null };
+    const trimmed = dueStr.trim();
+    const match = trimmed.match(/^(\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}-\d{2}-\d{2})\s*(.*)$/);
+    if (match) {
+      return {
+        date: match[1],
+        time: match[2]?.trim() || null,
+      };
+    }
+    return { date: trimmed, time: null };
+  };
+
+  // Keyboard listener for add task modal
+  useEffect(() => {
+    const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
+    const hideEvent = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
+    const showSub = Keyboard.addListener(showEvent, (e) => setAddKeyboardHeight(e.endCoordinates.height));
+    const hideSub = Keyboard.addListener(hideEvent, () => setAddKeyboardHeight(0));
+    return () => { showSub.remove(); hideSub.remove(); };
+  }, []);
+
+  const addScreenHeight = Dimensions.get('window').height;
+  const addModalScrollMaxHeight = addKeyboardHeight > 0
+    ? Math.max(220, addScreenHeight - addKeyboardHeight - 160)
+    : Math.min(540, addScreenHeight * 0.72);
 
   useEffect(() => {
     fetchTasks();
@@ -103,7 +202,7 @@ export const HomeScreen: React.FC = () => {
     );
 
     if (filter === 'pending') {
-      matchesFilter = task.status === 'pending' && !isAssignedOut;
+      matchesFilter = task.status === 'pending';
     } else if (filter === 'assigned') {
       // Both incoming assigned tasks (AssignBy: Admin) and outgoing assigned tasks (Assigned : Tanmay) show in Assign list!
       matchesFilter = (isAssignedOut || isAssignedToMe) && task.status !== 'completed';
@@ -141,28 +240,41 @@ export const HomeScreen: React.FC = () => {
   const handleOpenCreateTask = () => {
     fetchTeamMembers();
     setNewAssignedUser(null);
+    setNewAssignDropdownOpen(false);
+    setNewDueDate(getTodayDateStr());
+    setNewTaskTime(getCurrentTimeStr());
+    setNewCustomerName('');
+    setNewCustomerPhone('');
+    setNewStaffNote('');
     setShowAddModal(true);
   };
 
   const handleCreateTask = async () => {
-    if (!newCustomerName.trim() || !newCustomerPhone.trim()) {
-      Alert.alert('Missing Info', 'Please enter both customer name and phone number.');
-      return;
+    if (isCreatingTask) return;
+    try {
+      setIsCreatingTask(true);
+      const combinedDue = newTaskTime?.trim() ? `${newDueDate.trim()} ${newTaskTime.trim()}` : newDueDate.trim();
+
+      await addTask({
+        customerName: user?.name || 'Manual Task',
+        customerPhone: 'N/A',
+        staffNote: newStaffNote.trim(),
+        dueDate: combinedDue,
+        assignedToUserId: newAssignedUser ? newAssignedUser.id : null,
+      });
+
+      setNewCustomerName('');
+      setNewCustomerPhone('');
+      setNewStaffNote('');
+      setNewAssignedUser(null);
+      setNewAssignDropdownOpen(false);
+      setShowAddModal(false);
+      Alert.alert('Task Created', 'New task has been created successfully.');
+    } catch (e: any) {
+      Alert.alert('Error', e?.message || 'Failed to create task');
+    } finally {
+      setIsCreatingTask(false);
     }
-
-    await addTask({
-      customerName: newCustomerName.trim(),
-      customerPhone: newCustomerPhone.trim(),
-      staffNote: newStaffNote.trim(),
-      dueDate: newDueDate.trim(),
-      assignedToUserId: newAssignedUser ? newAssignedUser.id : null,
-    });
-
-    setNewCustomerName('');
-    setNewCustomerPhone('');
-    setNewStaffNote('');
-    setNewAssignedUser(null);
-    setShowAddModal(false);
   };
 
   const handleOpenAssignModal = (task: CRMTask) => {
@@ -218,102 +330,138 @@ export const HomeScreen: React.FC = () => {
     };
 
     const assignerDisplay = formatAssignerName(assignerRawName);
+    const eventInfo = parseCallEventInfo(item.original_message);
+    const { date: dueDatePart, time: dueTimePart } = parseDueDateAndTime(item.due_date);
+    const displayDate = dueDatePart || eventInfo?.callDate || null;
+    const displayTime = dueTimePart || eventInfo?.callTime || null;
 
     return (
       <View style={[styles.taskCard, isDone && styles.taskCardCompleted]}>
-        <View style={styles.taskCardHeader}>
-          <TouchableOpacity
-            style={[styles.checkbox, isDone && styles.checkboxCompleted]}
-            onPress={() => toggleTaskStatus(item.id)}
-            activeOpacity={0.7}
-          >
-            {isDone ? <Icon name="check" size={14} color={COLORS.bgWhite} strokeWidth={3} /> : null}
-          </TouchableOpacity>
+        {/* Top Accent Strip */}
+        <View style={[styles.taskAccentStrip, isDone ? styles.taskAccentDone : styles.taskAccentPending]} />
 
-          <View style={styles.customerInfo}>
-            <Text style={[styles.customerName, isDone && styles.textCompleted]} numberOfLines={1}>
-              {item.customer_name}
-            </Text>
-            <Text style={styles.customerPhone} numberOfLines={1}>{item.customer_phone}</Text>
-          </View>
-
-          <View style={[styles.statusBadge, isDone ? styles.badgeDone : styles.badgePending]}>
-            <Text style={[styles.statusBadgeText, isDone ? styles.textDone : styles.textPending]}>
-              {isDone ? 'Completed' : 'Pending'}
-            </Text>
-          </View>
-
-          {!item.assigned_to_name && !isAssignedByOther ? (
+        <View style={styles.taskCardInner}>
+          {/* Row 1: Checkbox + Name + Status + Delete */}
+          <View style={styles.taskCardHeader}>
             <TouchableOpacity
-              style={styles.assignButton}
-              onPress={() => handleOpenAssignModal(item)}
+              style={[styles.checkbox, isDone && styles.checkboxCompleted]}
+              onPress={() => toggleTaskStatus(item.id)}
               activeOpacity={0.7}
             >
-              <Icon name="user-plus" size={12} color={COLORS.primary} />
-              <Text style={styles.assignButtonText}>Assign</Text>
+              {isDone ? <Icon name="check" size={14} color={COLORS.bgWhite} strokeWidth={3} /> : null}
             </TouchableOpacity>
-          ) : null}
 
-          <TouchableOpacity
-            style={styles.deleteIconButton}
-            onPress={() => handleDeleteTask(item)}
-            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-          >
-            <Icon name="trash" size={18} color={COLORS.accentRed} />
-          </TouchableOpacity>
-        </View>
-
-        {item.original_message ? (
-          <View style={styles.quoteBox}>
-            <Text style={styles.quoteLabel}>Original Customer Message:</Text>
-            <Text style={styles.quoteText} numberOfLines={2}>
-              "{item.original_message}"
-            </Text>
-          </View>
-        ) : null}
-
-        {item.staff_note ? (
-          <View style={styles.noteBox}>
-            <Text style={styles.noteLabel}>Staff Action Note:</Text>
-            <Text style={styles.noteText}>{item.staff_note}</Text>
-          </View>
-        ) : null}
-
-        {item.created_by_name || item.assigned_to_name ? (
-          <View style={styles.assignedInfoRow}>
-            <Text style={styles.assignedInfoText}>
-              {item.created_by_name ? (
-                <>Created by <Text style={styles.assignedInfoBold}>{item.created_by_name}</Text></>
+            <View style={styles.customerInfo}>
+              <Text style={[styles.customerName, isDone && styles.textCompleted]} numberOfLines={1}>
+                {item.customer_name}
+              </Text>
+              {item.customer_phone && item.customer_phone !== 'N/A' ? (
+                <Text style={styles.customerPhone} numberOfLines={1}>{item.customer_phone}</Text>
               ) : null}
-              {item.created_by_name && item.assigned_to_name ? ' • ' : ''}
-              {item.assigned_to_name ? (
-                <>Assigned to <Text style={[styles.assignedInfoBold, { color: COLORS.primary }]}>{item.assigned_to_name}</Text></>
-              ) : null}
-            </Text>
-          </View>
-        ) : null}
+            </View>
 
-        <View style={styles.taskFooter}>
-          <View style={styles.dueDateRow}>
-            <Icon name="calendar" size={13} color={COLORS.textMuted} />
-            <Text style={styles.dueDateText}>Due: {item.due_date || 'No due date'}</Text>
-          </View>
-
-          {isAssignedByOther ? (
-            <View style={styles.assignByDisabledBadge}>
-              <Icon name="user" size={12} color="#64748B" />
-              <Text style={styles.assignByDisabledText}>
-                Assigned By: "{assignerDisplay}"
+            <View style={[styles.statusBadge, isDone ? styles.badgeDone : styles.badgePending]}>
+              <View style={[styles.statusDot, isDone ? styles.statusDotDone : styles.statusDotPending]} />
+              <Text style={[styles.statusBadgeText, isDone ? styles.textDone : styles.textPending]}>
+                {isDone ? 'Done' : 'Pending'}
               </Text>
             </View>
-          ) : item.assigned_to_name ? (
-            <View style={styles.assignedToDisabledBadge}>
-              <Icon name="user" size={12} color={COLORS.primary} />
-              <Text style={styles.assignedToDisabledText}>
-                Assigned to: "{item.assigned_to_name}"
+
+            <TouchableOpacity
+              style={styles.deleteIconButton}
+              onPress={() => handleDeleteTask(item)}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            >
+              <Icon name="trash" size={16} color="#94A3B8" />
+            </TouchableOpacity>
+          </View>
+
+          {/* Row 2: Event Details (Event Type, Date, Time) - Only show event type if available */}
+          {(eventInfo || displayDate || displayTime) ? (
+            <View style={styles.eventDetailsRow}>
+              {/* Event Type (Only show if available, not shown for self-added tasks) */}
+              {eventInfo?.eventType ? (
+                <View style={[styles.eventTypeBadge, { backgroundColor: eventInfo.eventColor + '12', borderColor: eventInfo.eventColor + '30' }]}>
+                  <Icon name={eventInfo.eventIcon} size={11} color={eventInfo.eventColor} />
+                  <Text style={[styles.eventTypeText, { color: eventInfo.eventColor }]}>
+                    {eventInfo.eventType}
+                  </Text>
+                </View>
+              ) : null}
+
+              {/* Date */}
+              {displayDate ? (
+                <View style={styles.eventMetaBadge}>
+                  <Icon name="calendar" size={11} color="#64748B" />
+                  <Text style={styles.eventMetaText}>{displayDate}</Text>
+                </View>
+              ) : null}
+
+              {/* Time */}
+              {displayTime ? (
+                <View style={styles.eventMetaBadge}>
+                  <Icon name="clock" size={11} color="#64748B" />
+                  <Text style={styles.eventMetaText}>{displayTime}</Text>
+                </View>
+              ) : null}
+
+              {/* Call Duration if available */}
+              {eventInfo?.duration ? (
+                <View style={styles.durationBadge}>
+                  <Text style={styles.durationBadgeText}>{eventInfo.duration}</Text>
+                </View>
+              ) : null}
+            </View>
+          ) : null}
+
+          {/* Staff Note */}
+          {item.staff_note ? (
+            <View style={styles.noteBox}>
+              <View style={styles.noteIconRow}>
+                <Icon name="edit" size={12} color={COLORS.primary} />
+                <Text style={styles.noteLabel}>Note</Text>
+              </View>
+              <Text style={styles.noteText} numberOfLines={3}>{item.staff_note}</Text>
+            </View>
+          ) : null}
+
+          {/* Original Message (Only show if real user message, not raw Call Log text) */}
+          {item.original_message && !item.original_message.startsWith('Call Log') ? (
+            <View style={styles.quoteBox}>
+              <Text style={styles.quoteText} numberOfLines={2}>
+                "{item.original_message}"
               </Text>
             </View>
           ) : null}
+
+          {/* Footer: Assign info */}
+          <View style={styles.taskFooter}>
+            <View style={styles.footerLeft}>
+              {isAssignedByOther ? (
+                <View style={styles.assignedByPill}>
+                  <Text style={styles.assignedByPillText}>by {assignerDisplay}</Text>
+                </View>
+              ) : null}
+            </View>
+
+            {item.assigned_to_name ? (
+              <View style={styles.assignedRightPill}>
+                <Icon name="user" size={11} color={COLORS.primary} />
+                <Text style={styles.assignedRightLabel}>
+                  Assigned:<Text style={styles.assignedRightName}>{item.assigned_to_name}</Text>
+                </Text>
+              </View>
+            ) : (
+              <TouchableOpacity
+                style={styles.assignButton}
+                onPress={() => handleOpenAssignModal(item)}
+                activeOpacity={0.7}
+              >
+                <Icon name="user-plus" size={12} color={COLORS.primary} />
+                <Text style={styles.assignButtonText}>Assign</Text>
+              </TouchableOpacity>
+            )}
+          </View>
         </View>
       </View>
     );
@@ -422,7 +570,7 @@ export const HomeScreen: React.FC = () => {
               );
             }}
           >
-            <Text style={styles.clearCompletedText}>Clear Done</Text>
+            <Text style={styles.clearCompletedText}>Clear All</Text>
           </TouchableOpacity>
         ) : null}
 
@@ -463,118 +611,239 @@ export const HomeScreen: React.FC = () => {
         visible={showAddModal}
         transparent
         animationType="slide"
-        onRequestClose={() => setShowAddModal(false)}
+        onRequestClose={() => {
+          Keyboard.dismiss();
+          setShowAddModal(false);
+        }}
       >
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalCard}>
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          style={[
+            styles.modalOverlay,
+            Platform.OS === 'android' && addKeyboardHeight > 0
+              ? { paddingBottom: addKeyboardHeight }
+              : null,
+          ]}
+        >
+          <TouchableOpacity
+            style={StyleSheet.absoluteFill}
+            activeOpacity={1}
+            onPress={() => {
+              Keyboard.dismiss();
+              if (newAssignDropdownOpen) setNewAssignDropdownOpen(false);
+            }}
+          />
+          <View style={[styles.modalCard, { maxHeight: '94%' }]}>
+            {/* Header */}
             <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>Create New Task</Text>
-              <TouchableOpacity onPress={() => setShowAddModal(false)}>
+              <Text style={styles.modalTitle}>Create New Task 📌</Text>
+              <TouchableOpacity
+                onPress={() => {
+                  Keyboard.dismiss();
+                  setShowAddModal(false);
+                }}
+                hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+              >
                 <Text style={styles.modalCloseText}>✕</Text>
               </TouchableOpacity>
             </View>
 
             <ScrollView
-              style={{ maxHeight: 420 }}
-              contentContainerStyle={{ paddingBottom: 10 }}
-              showsVerticalScrollIndicator={false}
+              ref={addModalScrollRef}
+              style={{ maxHeight: addModalScrollMaxHeight }}
+              contentContainerStyle={{
+                paddingBottom: addKeyboardHeight > 0 ? 120 : 36,
+                flexGrow: 1,
+              }}
+              showsVerticalScrollIndicator={true}
               keyboardShouldPersistTaps="handled"
+              nestedScrollEnabled={true}
             >
-              <View style={styles.formGroup}>
-                <Text style={styles.formLabel}>Customer Name *</Text>
-                <TextInput
-                  style={styles.formInput}
-                  placeholder="e.g. Ramesh Kumar"
-                  placeholderTextColor={COLORS.textSubtle}
-                  value={newCustomerName}
-                  onChangeText={setNewCustomerName}
-                />
-              </View>
+              {/* Date & Time Row */}
+              <View style={styles.dateTimeRow}>
+                <View style={styles.dateTimeCol}>
+                  <Text style={styles.fieldHeading}>Date :</Text>
+                  <View style={styles.dateTimeInputContainer}>
+                    <Icon name="calendar" size={14} color={COLORS.primary} />
+                    <TextInput
+                      style={styles.dateTimeInput}
+                      value={newDueDate}
+                      onChangeText={setNewDueDate}
+                      placeholder="DD/MM/YYYY"
+                      placeholderTextColor={COLORS.textSubtle}
+                      onFocus={() => {
+                        setTimeout(() => {
+                          addModalScrollRef.current?.scrollTo({ y: 160, animated: true });
+                        }, 180);
+                      }}
+                    />
+                  </View>
+                </View>
 
-              <View style={styles.formGroup}>
-                <Text style={styles.formLabel}>Customer WhatsApp Phone *</Text>
-                <TextInput
-                  style={styles.formInput}
-                  placeholder="e.g. +91 98765 43210"
-                  placeholderTextColor={COLORS.textSubtle}
-                  keyboardType="phone-pad"
-                  value={newCustomerPhone}
-                  onChangeText={setNewCustomerPhone}
-                />
-              </View>
-
-              <View style={styles.formGroup}>
-                <Text style={styles.formLabel}>Staff Follow-up Note</Text>
-                <TextInput
-                  style={[styles.formInput, { height: 72, textAlignVertical: 'top' }]}
-                  placeholder="e.g. Call customer at 3 PM to confirm invoice"
-                  placeholderTextColor={COLORS.textSubtle}
-                  multiline
-                  value={newStaffNote}
-                  onChangeText={setNewStaffNote}
-                />
-              </View>
-
-              <View style={styles.formGroup}>
-                <Text style={styles.formLabel}>Due Date (YYYY-MM-DD)</Text>
-                <TextInput
-                  style={styles.formInput}
-                  placeholder="YYYY-MM-DD"
-                  placeholderTextColor={COLORS.textSubtle}
-                  value={newDueDate}
-                  onChangeText={setNewDueDate}
-                />
-              </View>
-
-              {/* Assign To Field */}
-              <View style={styles.formGroup}>
-                <Text style={styles.formLabel}>Assign Task To</Text>
-                <View style={styles.assignChipsContainer}>
-                  <TouchableOpacity
-                    style={[styles.assignChip, !newAssignedUser && styles.assignChipActive]}
-                    onPress={() => setNewAssignedUser(null)}
-                    activeOpacity={0.7}
-                  >
-                    <Text style={[styles.assignChipText, !newAssignedUser && styles.assignChipTextActive]}>
-                      Unassigned
-                    </Text>
-                    {!newAssignedUser ? (
-                      <Icon name="check" size={12} color={COLORS.primary} strokeWidth={3} />
-                    ) : null}
-                  </TouchableOpacity>
-
-                  {availableAssignMembers.map((member) => {
-                    const isSelected = newAssignedUser?.id === member.id;
-                    return (
-                      <TouchableOpacity
-                        key={member.id}
-                        style={[styles.assignChip, isSelected && styles.assignChipActive]}
-                        onPress={() => setNewAssignedUser(member)}
-                        activeOpacity={0.7}
-                      >
-                        <View style={[styles.chipAvatar, isSelected && styles.chipAvatarActive]}>
-                          <Text style={[styles.chipAvatarText, isSelected && styles.chipAvatarTextActive]}>
-                            {(member.name || 'U').charAt(0).toUpperCase()}
-                          </Text>
-                        </View>
-                        <Text style={[styles.assignChipText, isSelected && styles.assignChipTextActive]}>
-                          {member.name}
-                        </Text>
-                        {isSelected ? (
-                          <Icon name="check" size={12} color={COLORS.primary} strokeWidth={3} />
-                        ) : null}
-                      </TouchableOpacity>
-                    );
-                  })}
+                <View style={styles.dateTimeCol}>
+                  <Text style={styles.fieldHeading}>Time :</Text>
+                  <View style={styles.dateTimeInputContainer}>
+                    <Icon name="clock" size={14} color={COLORS.primary} />
+                    <TextInput
+                      style={styles.dateTimeInput}
+                      value={newTaskTime}
+                      onChangeText={setNewTaskTime}
+                      placeholder="2:37pm"
+                      placeholderTextColor={COLORS.textSubtle}
+                      onFocus={() => {
+                        setTimeout(() => {
+                          addModalScrollRef.current?.scrollTo({ y: 160, animated: true });
+                        }, 180);
+                      }}
+                    />
+                  </View>
                 </View>
               </View>
-            </ScrollView>
 
-            <TouchableOpacity style={styles.modalSubmitBtn} onPress={handleCreateTask}>
-              <Text style={styles.modalSubmitText}>Save Task</Text>
-            </TouchableOpacity>
+              {/* Our Notes */}
+              <View style={styles.formGroup}>
+                <Text style={styles.fieldHeading}>Our Notes:</Text>
+                <TextInput
+                  style={styles.notesTextarea}
+                  value={newStaffNote}
+                  onChangeText={setNewStaffNote}
+                  placeholder="Write your Notes here (5 to 10 lines).."
+                  placeholderTextColor={COLORS.textSubtle}
+                  multiline={true}
+                  numberOfLines={6}
+                  textAlignVertical="top"
+                  onFocus={() => {
+                    setTimeout(() => {
+                      addModalScrollRef.current?.scrollToEnd({ animated: true });
+                    }, 180);
+                  }}
+                />
+              </View>
+
+              {/* Assign Task To */}
+              <View style={styles.formGroup}>
+                <Text style={styles.fieldHeading}>Assign Task To:</Text>
+                <TouchableOpacity
+                  style={[
+                    styles.dropdownTrigger,
+                    newAssignDropdownOpen && styles.dropdownTriggerActive,
+                  ]}
+                  onPress={() => {
+                    Keyboard.dismiss();
+                    fetchTeamMembers();
+                    setNewAssignDropdownOpen(!newAssignDropdownOpen);
+                  }}
+                  activeOpacity={0.8}
+                >
+                  <View style={styles.dropdownTriggerLeft}>
+                    <Text style={styles.dropdownTriggerText} numberOfLines={1}>
+                      {newAssignedUser ? newAssignedUser.name : 'Unassigned'}
+                    </Text>
+                  </View>
+                  <Icon
+                    name={newAssignDropdownOpen ? 'chevron-up' : 'chevron-down'}
+                    size={18}
+                    color={COLORS.textDark}
+                  />
+                </TouchableOpacity>
+
+                {newAssignDropdownOpen && (
+                  <View style={styles.dropdownMenu}>
+                    {/* Unassigned Option */}
+                    <TouchableOpacity
+                      style={[
+                        styles.dropdownItem,
+                        !newAssignedUser && styles.dropdownItemActive,
+                      ]}
+                      onPress={() => {
+                        setNewAssignedUser(null);
+                        setNewAssignDropdownOpen(false);
+                      }}
+                      activeOpacity={0.7}
+                    >
+                      <View style={styles.dropdownItemContent}>
+                        <View>
+                          <Text
+                            style={[
+                              styles.dropdownItemName,
+                              !newAssignedUser && styles.dropdownItemNameActive,
+                            ]}
+                          >
+                            Unassigned
+                          </Text>
+                          <Text style={styles.dropdownItemRole}>Default</Text>
+                        </View>
+                      </View>
+                      {!newAssignedUser ? (
+                        <Icon name="check" size={16} color={COLORS.primary} strokeWidth={2.5} />
+                      ) : null}
+                    </TouchableOpacity>
+
+                    {/* Team Member Options */}
+                    {availableAssignMembers.length === 0 ? (
+                      <View style={{ padding: 14, alignItems: 'center' }}>
+                        <Text style={{ fontSize: 13, color: COLORS.textMuted }}>
+                          No other users found
+                        </Text>
+                      </View>
+                    ) : (
+                      availableAssignMembers.map((member) => {
+                        const isSelected = newAssignedUser?.id === member.id;
+                        return (
+                          <TouchableOpacity
+                            key={member.id}
+                            style={[
+                              styles.dropdownItem,
+                              isSelected && styles.dropdownItemActive,
+                            ]}
+                            onPress={() => {
+                              setNewAssignedUser(member);
+                              setNewAssignDropdownOpen(false);
+                            }}
+                            activeOpacity={0.7}
+                          >
+                            <View style={styles.dropdownItemContent}>
+                              <View>
+                                <Text
+                                  style={[
+                                    styles.dropdownItemName,
+                                    isSelected && styles.dropdownItemNameActive,
+                                  ]}
+                                >
+                                  {member.name}
+                                </Text>
+                                <Text style={styles.dropdownItemRole}>
+                                  {member.role ? member.role.toUpperCase() : 'USER'}
+                                </Text>
+                              </View>
+                            </View>
+                            {isSelected ? (
+                              <Icon name="check" size={16} color={COLORS.primary} strokeWidth={2.5} />
+                            ) : null}
+                          </TouchableOpacity>
+                        );
+                      })
+                    )}
+                  </View>
+                )}
+              </View>
+
+              {/* Submit button */}
+              <TouchableOpacity
+                style={[styles.modalSubmitBtn, isCreatingTask && { opacity: 0.7 }]}
+                onPress={handleCreateTask}
+                disabled={isCreatingTask}
+                activeOpacity={0.85}
+              >
+                {isCreatingTask ? (
+                  <ActivityIndicator size="small" color={COLORS.bgWhite} />
+                ) : (
+                  <Text style={styles.modalSubmitText}>Submit</Text>
+                )}
+              </TouchableOpacity>
+            </ScrollView>
           </View>
-        </View>
+        </KeyboardAvoidingView>
       </Modal>
 
       {/* Assign Task Modal */}
@@ -930,37 +1199,51 @@ const styles = StyleSheet.create({
   taskCard: {
     backgroundColor: COLORS.bgWhite,
     borderRadius: RADIUS.lg,
-    padding: SPACING.md,
-    marginBottom: SPACING.md,
+    marginBottom: 14,
     borderWidth: 1,
-    borderColor: COLORS.borderColor,
-    shadowColor: COLORS.shadowColor,
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.04,
-    shadowRadius: 6,
-    elevation: 2,
+    borderColor: '#E8ECF1',
+    shadowColor: '#1A3B71',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.06,
+    shadowRadius: 12,
+    elevation: 3,
+    overflow: 'hidden',
   },
   taskCardCompleted: {
-    opacity: 0.75,
-    backgroundColor: '#FAF9F6',
+    opacity: 0.7,
+    borderColor: '#D1FAE5',
+  },
+  taskAccentStrip: {
+    height: 3,
+    width: '100%',
+  },
+  taskAccentPending: {
+    backgroundColor: COLORS.primary,
+  },
+  taskAccentDone: {
+    backgroundColor: '#10B981',
+  },
+  taskCardInner: {
+    padding: 14,
   },
   taskCardHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
+    gap: 10,
   },
   checkbox: {
-    width: 22,
-    height: 22,
-    borderRadius: 6,
+    width: 24,
+    height: 24,
+    borderRadius: 7,
     borderWidth: 2,
-    borderColor: COLORS.primaryNavy,
+    borderColor: '#CBD5E1',
     alignItems: 'center',
     justifyContent: 'center',
+    backgroundColor: '#F8FAFC',
   },
   checkboxCompleted: {
-    backgroundColor: COLORS.whatsappGreen,
-    borderColor: COLORS.whatsappGreen,
+    backgroundColor: '#10B981',
+    borderColor: '#10B981',
   },
   customerInfo: {
     flex: 1,
@@ -968,27 +1251,46 @@ const styles = StyleSheet.create({
   customerName: {
     fontSize: 15,
     fontWeight: '700',
-    color: COLORS.textDark,
+    color: COLORS.primaryNavy,
+    letterSpacing: 0.1,
   },
   textCompleted: {
     textDecorationLine: 'line-through',
-    color: COLORS.textMuted,
+    color: '#94A3B8',
   },
   customerPhone: {
     fontSize: 12,
     color: COLORS.textMuted,
-    marginTop: 1,
+    marginTop: 2,
   },
   statusBadge: {
-    paddingHorizontal: 8,
-    paddingVertical: 3,
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
     borderRadius: RADIUS.full,
+    gap: 5,
+  },
+  statusDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+  },
+  statusDotPending: {
+    backgroundColor: COLORS.primary,
+  },
+  statusDotDone: {
+    backgroundColor: '#10B981',
   },
   badgePending: {
-    backgroundColor: 'rgba(26, 59, 113, 0.1)',
+    backgroundColor: '#EFF6FF',
+    borderWidth: 1,
+    borderColor: '#DBEAFE',
   },
   badgeDone: {
-    backgroundColor: 'rgba(0, 168, 132, 0.12)',
+    backgroundColor: '#ECFDF5',
+    borderWidth: 1,
+    borderColor: '#D1FAE5',
   },
   statusBadgeText: {
     fontSize: 11,
@@ -998,67 +1300,191 @@ const styles = StyleSheet.create({
     color: COLORS.primary,
   },
   textDone: {
-    color: COLORS.whatsappGreen,
+    color: '#059669',
   },
   deleteIconButton: {
     padding: 6,
+    borderRadius: 8,
+    backgroundColor: '#F8FAFC',
+  },
+  eventDetailsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    flexWrap: 'wrap',
+    marginTop: 8,
+  },
+  eventTypeBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: RADIUS.full,
+    borderWidth: 1,
+  },
+  eventTypeText: {
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  eventMetaBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: '#F8FAFC',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: RADIUS.full,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+  },
+  eventMetaText: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#475569',
+  },
+  durationBadge: {
+    backgroundColor: '#F1F5F9',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: RADIUS.sm,
+  },
+  durationBadgeText: {
+    fontSize: 10,
+    fontWeight: '600',
+    color: '#64748B',
   },
   quoteBox: {
-    backgroundColor: COLORS.bgLinen,
-    borderRadius: RADIUS.sm,
+    backgroundColor: '#FFFBEB',
+    borderRadius: RADIUS.md,
     padding: 10,
     marginTop: 10,
     borderLeftWidth: 3,
-    borderLeftColor: COLORS.primary,
-  },
-  quoteLabel: {
-    fontSize: 10,
-    fontWeight: '700',
-    color: COLORS.textMuted,
-    textTransform: 'uppercase',
-    marginBottom: 2,
+    borderLeftColor: '#F59E0B',
   },
   quoteText: {
     fontSize: 12,
-    color: COLORS.textDark,
+    color: '#92400E',
     fontStyle: 'italic',
+    lineHeight: 18,
   },
   noteBox: {
-    backgroundColor: '#F8FAFC',
-    borderRadius: RADIUS.sm,
+    backgroundColor: '#F0F9FF',
+    borderRadius: RADIUS.md,
     padding: 10,
-    marginTop: 8,
+    marginTop: 10,
     borderWidth: 1,
-    borderColor: COLORS.borderColor,
+    borderColor: '#DBEAFE',
+  },
+  noteIconRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    marginBottom: 4,
   },
   noteLabel: {
-    fontSize: 10,
+    fontSize: 11,
     fontWeight: '700',
-    color: COLORS.primaryNavy,
-    marginBottom: 2,
+    color: COLORS.primary,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
   },
   noteText: {
     fontSize: 13,
-    color: COLORS.textDark,
+    color: '#334155',
+    lineHeight: 19,
   },
   taskFooter: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    alignItems: 'center',
-    marginTop: 10,
-    paddingTop: 8,
+    alignItems: 'flex-end',
+    marginTop: 12,
+    paddingTop: 10,
     borderTopWidth: 1,
-    borderTopColor: COLORS.borderColor,
+    borderTopColor: '#F1F5F9',
+  },
+  footerLeft: {
+    flex: 1,
+    gap: 6,
   },
   dueDateRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
+    gap: 5,
   },
   dueDateText: {
     fontSize: 11,
     fontWeight: '600',
     color: COLORS.textMuted,
+  },
+  assignInfoRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    flexWrap: 'wrap',
+  },
+  assignedToPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: '#EFF6FF',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: RADIUS.full,
+    borderWidth: 1,
+    borderColor: '#DBEAFE',
+  },
+  assignedToPillText: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: COLORS.primary,
+  },
+  assignedByPill: {
+    backgroundColor: '#F1F5F9',
+    paddingHorizontal: 7,
+    paddingVertical: 3,
+    borderRadius: RADIUS.full,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+  },
+  assignedByPillText: {
+    fontSize: 10,
+    fontWeight: '600',
+    color: '#64748B',
+  },
+  assignedRightPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    backgroundColor: '#EFF6FF',
+    borderWidth: 1,
+    borderColor: '#BFDBFE',
+    paddingHorizontal: 9,
+    paddingVertical: 4,
+    borderRadius: RADIUS.full,
+  },
+  assignedRightLabel: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: COLORS.primary,
+  },
+  assignedRightName: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: COLORS.primaryNavy,
+  },
+  unassignedPill: {
+    backgroundColor: '#F8FAFC',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: RADIUS.full,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+  },
+  unassignedPillText: {
+    fontSize: 10,
+    fontWeight: '600',
+    color: '#94A3B8',
   },
   emptyContainer: {
     alignItems: 'center',
@@ -1133,12 +1559,136 @@ const styles = StyleSheet.create({
     borderRadius: RADIUS.md,
     alignItems: 'center',
     justifyContent: 'center',
-    marginTop: SPACING.sm,
+    marginTop: SPACING.md,
+    shadowColor: COLORS.primary,
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.2,
+    shadowRadius: 5,
+    elevation: 3,
   },
   modalSubmitText: {
     color: COLORS.bgWhite,
-    fontSize: 15,
+    fontSize: 16,
     fontWeight: '700',
+    letterSpacing: 0.3,
+  },
+  fieldHeading: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: COLORS.primaryNavy,
+    marginBottom: 6,
+  },
+  dateTimeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+    marginBottom: SPACING.md,
+  },
+  dateTimeCol: {
+    flex: 1,
+  },
+  dateTimeInputContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#F8FAFC',
+    borderWidth: 1,
+    borderColor: '#CBD5E1',
+    borderRadius: RADIUS.md,
+    paddingHorizontal: 12,
+    height: 46,
+    gap: 8,
+  },
+  dateTimeInput: {
+    flex: 1,
+    fontSize: 13,
+    color: COLORS.textDark,
+    fontWeight: '600',
+    paddingVertical: 0,
+  },
+  notesTextarea: {
+    minHeight: 110,
+    maxHeight: 190,
+    backgroundColor: '#F8FAFC',
+    borderWidth: 1,
+    borderColor: '#CBD5E1',
+    borderRadius: RADIUS.md,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    fontSize: 14,
+    color: COLORS.textDark,
+    textAlignVertical: 'top',
+  },
+  dropdownTrigger: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: '#F8FAFC',
+    borderWidth: 1,
+    borderColor: '#CBD5E1',
+    borderRadius: RADIUS.md,
+    paddingHorizontal: 12,
+    height: 46,
+  },
+  dropdownTriggerActive: {
+    borderColor: COLORS.primary,
+    backgroundColor: '#EFF6FF',
+  },
+  dropdownTriggerLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    flex: 1,
+  },
+  dropdownTriggerText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: COLORS.textDark,
+    flex: 1,
+  },
+  dropdownMenu: {
+    backgroundColor: COLORS.bgWhite,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    borderRadius: RADIUS.md,
+    marginTop: 6,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+    elevation: 4,
+    overflow: 'hidden',
+  },
+  dropdownItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: '#F1F5F9',
+  },
+  dropdownItemActive: {
+    backgroundColor: '#EFF6FF',
+  },
+  dropdownItemContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    flex: 1,
+  },
+  dropdownItemName: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: COLORS.textDark,
+  },
+  dropdownItemNameActive: {
+    color: COLORS.primary,
+  },
+  dropdownItemRole: {
+    fontSize: 11,
+    color: COLORS.textMuted,
+    marginTop: 1,
   },
   assignedInfoRow: {
     marginTop: 6,
@@ -1360,36 +1910,5 @@ const styles = StyleSheet.create({
   chipAvatarTextActive: {
     color: COLORS.bgWhite,
   },
-  assignByDisabledBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 5,
-    backgroundColor: '#F1F5F9',
-    borderWidth: 1,
-    borderColor: '#CBD5E1',
-    paddingHorizontal: 9,
-    paddingVertical: 5,
-    borderRadius: RADIUS.sm,
-  },
-  assignByDisabledText: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: '#475569',
-  },
-  assignedToDisabledBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 5,
-    backgroundColor: '#EFF6FF',
-    borderWidth: 1,
-    borderColor: '#BFDBFE',
-    paddingHorizontal: 9,
-    paddingVertical: 5,
-    borderRadius: RADIUS.sm,
-  },
-  assignedToDisabledText: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: COLORS.primary,
-  },
 });
+

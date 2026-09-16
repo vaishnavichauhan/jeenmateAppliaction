@@ -12,11 +12,13 @@ import {
   Modal,
   Alert,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useAuthStore } from '../../store/authStore';
 import { COLORS, SPACING, RADIUS } from '../../constants/theme';
 import { Icon } from '../../components/common/Icon';
 
 export const LoginScreen: React.FC = () => {
+  const insets = useSafeAreaInsets();
   const { login, serverUrl, setServerUrl, testServerConnection, isLoading, loginError } = useAuthStore();
 
   const [email, setEmail] = useState('admin@support.com');
@@ -62,7 +64,10 @@ export const LoginScreen: React.FC = () => {
       keyboardVerticalOffset={Platform.OS === 'ios' ? 40 : 0}
     >
       <ScrollView
-        contentContainerStyle={styles.scrollContent}
+        contentContainerStyle={[
+          styles.scrollContent,
+          { paddingTop: Math.max(insets.top, 20) + 24 },
+        ]}
         keyboardShouldPersistTaps="handled"
         showsVerticalScrollIndicator={false}
       >
@@ -87,7 +92,7 @@ export const LoginScreen: React.FC = () => {
 
           {/* Email Field */}
           <View style={styles.inputGroup}>
-            <Text style={styles.inputLabel}>Staff Email</Text>
+            <Text style={styles.inputLabel}>Email Id</Text>
             <View style={styles.inputWrapper}>
               <View style={styles.inputIcon}>
                 <Icon name="mail" size={18} color={COLORS.primary} />
@@ -127,7 +132,7 @@ export const LoginScreen: React.FC = () => {
                 hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
               >
                 <Icon
-                  name={showPassword ? 'eye-off' : 'eye'}
+                  name={showPassword ? 'eye' : 'eye-off'}
                   size={20}
                   color={COLORS.textMuted}
                 />
@@ -145,13 +150,13 @@ export const LoginScreen: React.FC = () => {
             {isLoading ? (
               <ActivityIndicator color={COLORS.bgWhite} size="small" />
             ) : (
-              <Text style={styles.submitButtonText}>Sign In to Portal</Text>
+              <Text style={styles.submitButtonText}>Sign In</Text>
             )}
           </TouchableOpacity>
         </View>
 
         {/* Server IP / URL Configuration Selector */}
-        <View style={styles.serverConfigContainer}>
+        {/* <View style={styles.serverConfigContainer}>
           <View style={styles.serverInfoRow}>
             <View style={{ flex: 1 }}>
               <Text style={styles.serverConfigLabel}>Backend Server</Text>
@@ -170,7 +175,7 @@ export const LoginScreen: React.FC = () => {
               <Text style={styles.serverChangeText}>Change IP</Text>
             </TouchableOpacity>
           </View>
-        </View>
+        </View> */}
       </ScrollView>
 
       {/* Server URL Change Modal */}
@@ -252,13 +257,13 @@ const styles = StyleSheet.create({
   scrollContent: {
     flexGrow: 1,
     paddingHorizontal: SPACING.xl,
-    paddingTop: Platform.OS === 'ios' ? 60 : 40,
-    paddingBottom: SPACING.xxxl,
-    justifyContent: 'center',
+    paddingBottom: SPACING.xl,
+    justifyContent: 'flex-start',
   },
   brandContainer: {
     alignItems: 'center',
-    marginBottom: SPACING.xl,
+    marginTop: SPACING.xxxl,
+    marginBottom: SPACING.lg,
   },
   badgePill: {
     flexDirection: 'row',

@@ -17,5 +17,6 @@ router.get('/debug-msgs', whatsappController.debugMsgs);
 router.get('/sync-chat-messages', whatsappController.syncChatMessages);
 router.post('/restart', whatsappController.restartSession);
 router.post('/sync', whatsappController.syncChats);
+router.post('/log-call', whatsappController.logCall);
 
 module.exports = router;

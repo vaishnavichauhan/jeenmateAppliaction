@@ -6,7 +6,7 @@ import { getSocket } from '../services/socket';
 export interface ChatMessage {
   id: string;
   conversation_id: string;
-  sender: 'staff' | 'customer';
+  sender: 'staff' | '';
   text: string;
   timestamp: string;
   status: 'sent' | 'delivered' | 'read';
@@ -35,9 +35,13 @@ interface ChatState {
   isSyncing: boolean;
   whatsappStatus: 'online' | 'waiting' | 'offline';
   isSocketListening: boolean;
+  hasMoreMessages: boolean;
+  isLoadingOlder: boolean;
 
+  clearMessages: () => void;
   fetchConversations: () => Promise<void>;
   fetchMessages: (conversationId: string) => Promise<void>;
+  fetchOlderMessages: (conversationId: string) => Promise<number>;
   sendMessage: (conversationId: string, text: string) => Promise<boolean>;
   setActiveConversation: (conversation: Conversation | null) => void;
   setSearchQuery: (query: string) => void;
@@ -54,12 +58,72 @@ const parseTime = (t?: string) => {
   return isNaN(d.getTime()) ? 0 : d.getTime();
 };
 
+export const deduplicateConversations = (convs: Conversation[]): Conversation[] => {
+  // Step 1: Deduplicate by conversation ID
+  const byId = new Map<string, Conversation>();
+  convs.forEach((c) => {
+    const existing = byId.get(c.id);
+    if (!existing) {
+      byId.set(c.id, c);
+    } else {
+      const existingTime = parseTime(existing.last_message_at);
+      const currentTime = parseTime(c.last_message_at);
+      if (currentTime > existingTime) {
+        byId.set(c.id, c);
+      }
+    }
+  });
+
+  // Step 2: Deduplicate by phone_number (same contact may have multiple conversation records)
+  const byPhone = new Map<string, Conversation>();
+  Array.from(byId.values()).forEach((c) => {
+    const phone = (c.phone_number || '').replace(/[^0-9]/g, '');
+    if (!phone) {
+      byPhone.set(`__nophone_${c.id}`, c);
+      return;
+    }
+    const existing = byPhone.get(phone);
+    if (!existing) {
+      byPhone.set(phone, c);
+    } else {
+      const existingTime = parseTime(existing.last_message_at);
+      const currentTime = parseTime(c.last_message_at);
+      if (currentTime > existingTime) {
+        byPhone.set(phone, c);
+      }
+    }
+  });
+
+  // Step 3: Deduplicate by customer_name (same person may have different phone numbers, e.g. LID vs real)
+  const byName = new Map<string, Conversation>();
+  Array.from(byPhone.values()).forEach((c) => {
+    const name = (c.customer_name || '').trim().toLowerCase();
+    if (!name || name === 'customer' || name === 'contact') {
+      // Generic names — don't merge, keep as-is
+      byName.set(`__generic_${c.id}`, c);
+      return;
+    }
+    const existing = byName.get(name);
+    if (!existing) {
+      byName.set(name, c);
+    } else {
+      const existingTime = parseTime(existing.last_message_at);
+      const currentTime = parseTime(c.last_message_at);
+      if (currentTime > existingTime) {
+        byName.set(name, c);
+      }
+    }
+  });
+
+  return Array.from(byName.values());
+};
+
 export const sortConversations = (convs: Conversation[]): Conversation[] => {
-  return [...convs].sort((a, b) => {
+  const uniqueConvs = deduplicateConversations(convs);
+  return [...uniqueConvs].sort((a, b) => {
     const pinA = a.is_pinned ? 1 : 0;
     const pinB = b.is_pinned ? 1 : 0;
     if (pinA !== pinB) return pinB - pinA;
-
     const timeA = parseTime(a.last_message_at);
     const timeB = parseTime(b.last_message_at);
     return timeB - timeA;
@@ -76,6 +140,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
   isSyncing: false,
   whatsappStatus: 'online',
   isSocketListening: false,
+  hasMoreMessages: true,
+  isLoadingOlder: false,
+
+  clearMessages: () => {
+    set({ messages: [], isLoading: false });
+  },
 
   fetchConversations: async () => {
     try {
@@ -95,7 +165,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           const parsed = JSON.parse(cached).filter((c: any) => !c.id?.startsWith('conv_00'));
           set({ conversations: sortConversations(parsed) });
         }
-      } catch (err) {}
+      } catch (err) { }
     } finally {
       set({ isLoading: false });
     }
@@ -103,11 +173,26 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   fetchMessages: async (conversationId: string) => {
     try {
-      set({ isLoading: true });
-      const res = await apiClient.get(`/api/conversations/${conversationId}/messages`);
+      // Clear previous conversation messages immediately and show loader
+      set({ isLoading: true, messages: [] });
+      const res = await apiClient.get(`/api/conversations/${conversationId}/messages`, {
+        params: { limit: 30 },
+      });
       if (res.data && res.data.success) {
         const rawMsgs: ChatMessage[] = res.data.data || [];
-        const sortedMsgs = [...rawMsgs].sort((a, b) => {
+
+        // Deduplicate messages by ID only
+        const seenIds = new Set<string>();
+        const uniqueMsgs: ChatMessage[] = [];
+
+        for (const m of rawMsgs) {
+          if (!m.id) continue;
+          if (seenIds.has(m.id)) continue;
+          seenIds.add(m.id);
+          uniqueMsgs.push(m);
+        }
+
+        const sortedMsgs = uniqueMsgs.sort((a, b) => {
           const timeA = parseTime(a.timestamp);
           const timeB = parseTime(b.timestamp);
           return timeA - timeB;
@@ -115,6 +200,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
         set({
           messages: sortedMsgs,
+          hasMoreMessages: res.data.hasMore !== false,
           isLoading: false,
         });
 
@@ -131,8 +217,70 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
     } catch (e) {
       console.log('[ChatStore] Message fetch failed');
-      set({ messages: [], isLoading: false });
+      set({ messages: [], isLoading: false, hasMoreMessages: true });
     }
+  },
+
+  fetchOlderMessages: async (conversationId: string): Promise<number> => {
+    const currentMessages = get().messages;
+    if (currentMessages.length === 0 || get().isLoadingOlder) {
+      return 0;
+    }
+
+    try {
+      set({ isLoadingOlder: true });
+
+      // Find the oldest message timestamp currently displayed
+      const oldestMsg = currentMessages[0];
+      const beforeTimestamp = oldestMsg?.timestamp;
+
+      const res = await apiClient.get(`/api/conversations/${conversationId}/messages`, {
+        params: {
+          before: beforeTimestamp,
+          limit: 30,
+        },
+      });
+
+      if (res.data && res.data.success) {
+        const rawOlderMsgs: ChatMessage[] = res.data.data || [];
+        // Deduplicate against existing messages by ID only
+        const existingIds = new Set(currentMessages.map((m) => m.id));
+
+        if (rawOlderMsgs.length === 0) {
+          set({ hasMoreMessages: false, isLoadingOlder: false });
+          return 0;
+        }
+
+        const newOlder = rawOlderMsgs.filter((m) => {
+          if (!m.id) return false;
+          return !existingIds.has(m.id);
+        });
+
+        if (newOlder.length === 0) {
+          set({ hasMoreMessages: false, isLoadingOlder: false });
+          return 0;
+        }
+
+        const sortedCombined = [...newOlder, ...currentMessages].sort((a, b) => {
+          const timeA = parseTime(a.timestamp);
+          const timeB = parseTime(b.timestamp);
+          return timeA - timeB;
+        });
+
+        set({
+          messages: sortedCombined,
+          hasMoreMessages: res.data.hasMore ?? true,
+          isLoadingOlder: false,
+        });
+
+        return newOlder.length;
+      }
+    } catch (err) {
+      console.log('[ChatStore] fetchOlderMessages failed:', err);
+    } finally {
+      set({ isLoadingOlder: false });
+    }
+    return 0;
   },
 
   sendMessage: async (conversationId: string, text: string) => {
@@ -216,7 +364,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
       if (activeConversation && activeConversation.id === payload.conversationId) {
         set((state) => {
-          const exists = state.messages.some((m) => m.id === payload.message.id);
+          const exists = state.messages.some(
+            (m) =>
+              m.id === payload.message.id ||
+              (m.sender === payload.message.sender &&
+                m.text === payload.message.text &&
+                Math.abs(parseTime(m.timestamp) - parseTime(payload.message.timestamp)) < 5000)
+          );
           if (exists) return state;
           const updated = [...state.messages, payload.message].sort((a, b) => {
             return parseTime(a.timestamp) - parseTime(b.timestamp);

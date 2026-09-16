@@ -24,7 +24,7 @@ async function getConversations(req, res, next) {
 async function getMessages(req, res, next) {
   try {
     const { id } = req.params;
-    const { limit = 100 } = req.query;
+    const { limit = 30, before, mode } = req.query;
 
     const conversation = await Conversation.findById(id);
     if (!conversation) {
@@ -38,12 +38,14 @@ async function getMessages(req, res, next) {
     await Conversation.resetUnread(id);
 
     // Sync latest messages for this conversation from WhatsApp Web if available
-    const [custRows] = await pool.execute('SELECT id, whatsapp_jid FROM customers WHERE id = ?', [conversation.customer_id]);
+    const [custRows] = await pool.execute('SELECT id, whatsapp_jid, phone_number FROM customers WHERE id = ?', [conversation.customer_id]);
+    const targetJid = custRows[0]?.whatsapp_jid || (custRows[0]?.phone_number ? `${custRows[0].phone_number.replace(/[^0-9]/g, '')}@c.us` : null);
     const userSession = sessionManager.getSession(req.user?.id);
-    if (custRows.length > 0 && custRows[0].whatsapp_jid && userSession && userSession.client && userSession.client.pupPage) {
-      const jid = custRows[0].whatsapp_jid;
+    if (custRows.length > 0 && targetJid && userSession && userSession.client && userSession.client.pupPage) {
       try {
-        const liveMsgs = await userSession.fetchMessagesForChat(jid, 40);
+        const fetchLimit = before ? 100 : 60;
+        const customerPhone = custRows[0].phone_number || null;
+        const liveMsgs = await userSession.fetchMessagesForChat(targetJid, fetchLimit, customerPhone);
         if (liveMsgs.length > 0) {
           for (const m of liveMsgs) {
             const iso = new Date(m.timestamp * 1000).toISOString().slice(0, 19).replace('T', ' ');
@@ -52,14 +54,21 @@ async function getMessages(req, res, next) {
             const safeBody = m.body || '';
 
             const [exist] = await pool.execute(
-              `SELECT id, whatsapp_message_id FROM messages 
-               WHERE conversation_id = ? AND (whatsapp_message_id = ? OR (direction = ? AND message = ?)) 
+              `SELECT id, whatsapp_message_id, message FROM messages 
+               WHERE conversation_id = ? AND (
+                 (whatsapp_message_id IS NOT NULL AND whatsapp_message_id = ?) OR 
+                 (direction = ? AND ABS(TIMESTAMPDIFF(SECOND, created_at, ?)) <= 15)
+               ) 
                LIMIT 1`,
-              [id, safeMsgId, dir, safeBody]
+              [id, safeMsgId, dir, iso]
             );
             if (exist.length > 0) {
-              if (!exist[0].whatsapp_message_id && safeMsgId) {
-                await pool.execute('UPDATE messages SET whatsapp_message_id = ? WHERE id = ?', [safeMsgId, exist[0].id]);
+              const existingMsg = exist[0];
+              if (!existingMsg.whatsapp_message_id && safeMsgId) {
+                await pool.execute('UPDATE messages SET whatsapp_message_id = ? WHERE id = ?', [safeMsgId, existingMsg.id]);
+              }
+              if (safeBody && safeBody !== existingMsg.message && !(existingMsg.message === 'Video' && safeBody === 'Images')) {
+                await pool.execute('UPDATE messages SET message = ? WHERE id = ?', [safeBody, existingMsg.id]);
               }
             } else {
               await pool.execute(
@@ -75,12 +84,18 @@ async function getMessages(req, res, next) {
       }
     }
 
-    const messages = await Message.findByConversationId(id, limit);
+    const result = await Message.findByConversationId(id, { limit, before, mode });
+
+    // If WhatsApp Web is connected, more historical messages can always be fetched from WhatsApp
+    const hasLiveSession = !!(userSession && userSession.client && userSession.client.pupPage);
+    const finalHasMore = result.hasMore || hasLiveSession;
 
     return res.status(200).json({
       success: true,
       conversation,
-      data: messages
+      data: result.messages,
+      hasMore: finalHasMore,
+      oldestTimestamp: result.oldestTimestamp
     });
   } catch (err) {
     next(err);

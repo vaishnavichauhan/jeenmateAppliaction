@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import React, { useCallback, useState } from 'react';
 import {
   View,
   Text,
@@ -10,16 +10,18 @@ import {
   Share,
   Alert,
   Platform,
+  Modal,
+  TextInput,
+  Clipboard,
 } from 'react-native';
-import { useNavigation } from '@react-navigation/native';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useNavigation, useFocusEffect } from '@react-navigation/native';
 import { useWhatsAppStore } from '../../store/whatsappStore';
 import { COLORS, SPACING, RADIUS } from '../../constants/theme';
 import { Icon } from '../../components/common/Icon';
+import { Header } from '../../components/common/Header';
 
 export const LinkScreen: React.FC = () => {
   const navigation = useNavigation<any>();
-  const insets = useSafeAreaInsets();
   const {
     isConnected,
     status,
@@ -37,20 +39,15 @@ export const LinkScreen: React.FC = () => {
 
   const qrPageUrl = getQrPageUrl();
 
-  useEffect(() => {
-    fetchStatus();
-    fetchQr();
-
-    // Auto-refresh QR code every 3 seconds if not connected
-    const interval = setInterval(() => {
+  // Only check WhatsApp status once when LinkScreen gains focus (no continuous polling)
+  useFocusEffect(
+    useCallback(() => {
       fetchStatus();
-      if (!isConnected) {
-        fetchQr();
-      }
-    }, 3000);
+    }, [fetchStatus])
+  );
 
-    return () => clearInterval(interval);
-  }, [fetchStatus, fetchQr, isConnected]);
+  const [showUrlModal, setShowUrlModal] = useState(false);
+  const [copied, setCopied] = useState(false);
 
   const handleShareLink = async () => {
     try {
@@ -65,11 +62,18 @@ export const LinkScreen: React.FC = () => {
   };
 
   const handleCopyLink = () => {
-    Alert.alert(
-      'QR Page URL',
-      `URL:\n${qrPageUrl}\n\nYou can open this address directly on your computer browser to scan the WhatsApp QR code.`,
-      [{ text: 'OK' }]
-    );
+    setShowUrlModal(true);
+    setCopied(false);
+  };
+
+  const copyToClipboard = () => {
+    try {
+      Clipboard.setString(qrPageUrl);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2500);
+    } catch (e) {
+      console.log('Clipboard error', e);
+    }
   };
 
   const handleResetSession = () => {
@@ -91,21 +95,13 @@ export const LinkScreen: React.FC = () => {
   };
 
   return (
-    <ScrollView contentContainerStyle={styles.container} showsVerticalScrollIndicator={false}>
-      {/* Top Header */}
-      <View style={[styles.topHeader, { paddingTop: Math.max(insets.top, 20) + 12 }]}>
-        <TouchableOpacity
-          style={styles.backButton}
-          onPress={() => navigation.navigate('Home')}
-          activeOpacity={0.7}
-          hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
-        >
-          <Icon name="arrow-left" size={20} color={COLORS.primaryNavy} strokeWidth={2.5} />
-        </TouchableOpacity>
-        <Text style={styles.headerTitle}>WhatsApp Session</Text>
-      </View>
-
-      {/* Main Connection Card */}
+    <View style={styles.screenWrapper}>
+      <Header
+        title="WhatsApp Session"
+        onBack={() => navigation.navigate('Home')}
+      />
+      <ScrollView contentContainerStyle={styles.container} showsVerticalScrollIndicator={false}>
+        {/* Main Connection Card */}
       <View style={styles.card}>
         {isConnected ? (
           <View style={styles.connectedContainer}>
@@ -113,11 +109,6 @@ export const LinkScreen: React.FC = () => {
               <Icon name="check-double" size={32} color={COLORS.whatsappGreen} strokeWidth={2.5} />
             </View>
             <Text style={styles.connectedTitle}>Session Active & Ready</Text>
-            <Text style={styles.connectedDesc}>
-              Incoming customer messages will automatically appear in your live inbox and can be
-              converted into CRM tasks with 1-tap.
-            </Text>
-
             <View style={styles.sessionDetailsBox}>
               <View style={styles.detailRow}>
                 <Text style={styles.detailLabel}>Connected Name</Text>
@@ -150,28 +141,31 @@ export const LinkScreen: React.FC = () => {
             </Text>
 
             <View style={styles.qrImageFrame}>
-              {qrDataUrl ? (
+              {isLoading ? (
+                <View style={styles.qrLoadingBox}>
+                  <ActivityIndicator size="large" color={COLORS.primary} />
+                  <Text style={styles.qrLoadingText}>
+                    Generating QR code... Please wait
+                  </Text>
+                </View>
+              ) : qrDataUrl ? (
                 <Image
                   source={{ uri: qrDataUrl }}
                   style={styles.qrImage}
                   resizeMode="contain"
                 />
               ) : (
-                <View style={styles.qrLoadingBox}>
-                  <ActivityIndicator size="large" color={COLORS.primary} />
-                  <Text style={styles.qrLoadingText}>
-                    {isLoading ? 'Fetching QR code...' : 'Generating QR code in background...'}
+                <View style={styles.qrEmptyBox}>
+                  <Icon name="qr-code" size={46} color={COLORS.textMuted} strokeWidth={1.5} />
+                  <Text style={styles.qrEmptyTitle}>No QR Code Active</Text>
+                  <Text style={styles.qrEmptySub}>
+                    Tap "Generate QR Code" below to generate a new WhatsApp QR code.
                   </Text>
                 </View>
               )}
             </View>
 
-            <View style={styles.autoRefreshBadge}>
-              <Icon name="clock" size={12} color={COLORS.textMuted} />
-              <Text style={styles.autoRefreshText}>Auto-refreshes every 3 seconds</Text>
-            </View>
-
-            {/* Direct Regenerate QR button */}
+            {/* Direct Regenerate / Generate QR button */}
             <TouchableOpacity
               style={styles.regenerateButton}
               onPress={() => regenerateQr()}
@@ -182,22 +176,30 @@ export const LinkScreen: React.FC = () => {
                 <ActivityIndicator size="small" color={COLORS.primaryNavy} />
               ) : (
                 <>
-                  <Icon name="refresh" size={15} color={COLORS.primaryNavy} strokeWidth={2.2} />
-                  <Text style={styles.regenerateButtonText}>Regenerate QR Code</Text>
+                  <Icon name="refresh" size={16} color={COLORS.primaryNavy} strokeWidth={2.2} />
+                  <Text style={styles.regenerateButtonText}>
+                    {qrDataUrl ? 'Regenerate QR Code' : 'Generate QR Code'}
+                  </Text>
                 </>
               )}
             </TouchableOpacity>
+
+            {/* Note regarding QR Code expiration */}
+            <View style={styles.expiryNoteBox}>
+              <View style={styles.expiryNoteHeader}>
+                <Icon name="clock" size={13} color="#B45309" strokeWidth={2.2} />
+                <Text style={styles.expiryNoteTitle}>Important Note:</Text>
+              </View>
+              <Text style={styles.expiryNoteText}>
+                The QR code expires in 1 minute. If you do not scan it before expiry, please press <Text style={{ fontWeight: '700' }}>"Regenerate QR Code"</Text> to generate a new one.
+              </Text>
+            </View>
           </View>
         )}
 
         {/* QR Page Link & Sharing */}
         <View style={styles.linkShareSection}>
-          <Text style={styles.linkShareLabel}>Web Browser Scanner URL</Text>
-          <View style={styles.urlBox}>
-            <Text style={styles.urlText} numberOfLines={1}>
-              {qrPageUrl}
-            </Text>
-          </View>
+         {/*  */}
 
           <View style={styles.actionButtonsRow}>
             <TouchableOpacity
@@ -245,43 +247,99 @@ export const LinkScreen: React.FC = () => {
           )}
         </TouchableOpacity>
       </View>
-    </ScrollView>
+      </ScrollView>
+
+      {/* Show Full URL & Copy Modal */}
+      <Modal
+        visible={showUrlModal}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={() => setShowUrlModal(false)}
+      >
+        <TouchableOpacity
+          style={styles.modalOverlay}
+          activeOpacity={1}
+          onPress={() => setShowUrlModal(false)}
+        >
+          <TouchableOpacity
+            style={styles.modalCard}
+            activeOpacity={1}
+            onPress={(e) => e.stopPropagation()}
+          >
+            <View style={styles.modalHeader}>
+              <View style={styles.modalTitleRow}>
+                <View style={styles.modalIconWrap}>
+                  <Icon name="link" size={17} color={COLORS.primaryNavy} />
+                </View>
+                <Text style={styles.modalTitle}>QR Web Scanner URL</Text>
+              </View>
+              <TouchableOpacity
+                onPress={() => setShowUrlModal(false)}
+                style={styles.modalCloseBtn}
+                hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+              >
+                <Text style={styles.modalCloseText}>✕</Text>
+              </TouchableOpacity>
+            </View>
+
+            <Text style={styles.modalSubtitle}>
+              Open this URL in a browser on your PC to scan and link WhatsApp Web:
+            </Text>
+
+            <View style={styles.modalUrlInputWrapper}>
+              <TextInput
+                value={qrPageUrl}
+                editable={false}
+                multiline={true}
+                selectTextOnFocus={true}
+                style={styles.modalUrlInput}
+              />
+            </View>
+
+            {copied && (
+              <View style={styles.copiedBadge}>
+                <Icon name="check" size={13} color="#16A34A" />
+                <Text style={styles.copiedBadgeText}>Copied to clipboard!</Text>
+              </View>
+            )}
+
+            <View style={styles.modalBtnRow}>
+              <TouchableOpacity
+                style={[styles.modalActionBtn, styles.modalCopyBtn, copied && styles.modalCopyBtnActive]}
+                onPress={copyToClipboard}
+                activeOpacity={0.8}
+              >
+                <Icon name={copied ? 'check' : 'copy'} size={15} color={copied ? '#FFFFFF' : COLORS.primaryNavy} />
+                <Text style={[styles.modalCopyBtnText, copied && { color: '#FFFFFF' }]}>
+                  {copied ? 'Copied!' : 'Copy URL'}
+                </Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[styles.modalActionBtn, styles.modalShareBtn]}
+                onPress={handleShareLink}
+                activeOpacity={0.8}
+              >
+                <Icon name="share" size={15} color="#FFFFFF" />
+                <Text style={styles.modalShareBtnText}>Share Link</Text>
+              </TouchableOpacity>
+            </View>
+          </TouchableOpacity>
+        </TouchableOpacity>
+      </Modal>
+    </View>
   );
 };
 
 const styles = StyleSheet.create({
-  container: {
-    paddingBottom: SPACING.xxxl,
-    backgroundColor: COLORS.bgLinen,
-  },
-  topHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: SPACING.lg,
-    paddingTop: Platform.OS === 'ios' ? 12 : SPACING.sm,
-    paddingHorizontal: SPACING.lg,
-    gap: 14,
-  },
-  backButton: {
-    width: 40,
-    height: 40,
-    borderRadius: RADIUS.md,
+  screenWrapper: {
+    flex: 1,
     backgroundColor: COLORS.bgWhite,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 1,
-    borderColor: COLORS.borderColor,
-    shadowColor: COLORS.shadowColor,
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.06,
-    shadowRadius: 4,
-    elevation: 2,
   },
-  headerTitle: {
-    fontSize: 22,
-    fontWeight: '800',
-    color: COLORS.primaryNavy,
-    letterSpacing: -0.4,
+  container: {
+    paddingTop: 0,
+    paddingBottom: SPACING.xxxl,
+    backgroundColor: COLORS.bgWhite,
   },
   connectedName: {
     fontSize: 22,
@@ -342,8 +400,8 @@ const styles = StyleSheet.create({
     borderRadius: 0,
     paddingVertical: SPACING.xl,
     paddingHorizontal: SPACING.lg,
-    borderTopWidth: 1,
-    borderBottomWidth: 1,
+    borderTopWidth: 0,
+    borderBottomWidth: 0,
     borderLeftWidth: 0,
     borderRightWidth: 0,
     borderColor: COLORS.borderColor,
@@ -449,16 +507,24 @@ const styles = StyleSheet.create({
     marginTop: 10,
     textAlign: 'center',
   },
-  autoRefreshBadge: {
-    flexDirection: 'row',
+  qrEmptyBox: {
     alignItems: 'center',
-    gap: 6,
-    marginTop: 10,
+    justifyContent: 'center',
+    padding: SPACING.md,
   },
-  autoRefreshText: {
+  qrEmptyTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: COLORS.textDark,
+    marginTop: 8,
+  },
+  qrEmptySub: {
     fontSize: 11,
     color: COLORS.textMuted,
-    fontWeight: '500',
+    textAlign: 'center',
+    marginTop: 4,
+    lineHeight: 16,
+    paddingHorizontal: 10,
   },
   regenerateButton: {
     flexDirection: 'row',
@@ -478,6 +544,31 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '700',
     color: COLORS.primaryNavy,
+  },
+  expiryNoteBox: {
+    backgroundColor: '#FFFBEB',
+    borderWidth: 1,
+    borderColor: '#FDE68A',
+    borderRadius: RADIUS.md,
+    padding: 10,
+    marginTop: 14,
+    width: 260,
+  },
+  expiryNoteHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    marginBottom: 4,
+  },
+  expiryNoteTitle: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#92400E',
+  },
+  expiryNoteText: {
+    fontSize: 11,
+    color: '#78350F',
+    lineHeight: 16,
   },
   linkShareSection: {
     marginTop: SPACING.xl,
@@ -573,5 +664,132 @@ const styles = StyleSheet.create({
     color: COLORS.accentRed,
     fontSize: 13,
     fontWeight: '700',
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(15, 23, 42, 0.55)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: SPACING.lg,
+  },
+  modalCard: {
+    width: '100%',
+    maxWidth: 360,
+    backgroundColor: COLORS.bgWhite,
+    borderRadius: RADIUS.xl,
+    padding: SPACING.lg,
+    borderWidth: 1,
+    borderColor: COLORS.borderColor,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.15,
+    shadowRadius: 16,
+    elevation: 8,
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: SPACING.xs,
+  },
+  modalTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  modalIconWrap: {
+    width: 32,
+    height: 32,
+    borderRadius: RADIUS.sm,
+    backgroundColor: '#EEF2FF',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  modalTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: COLORS.textDark,
+  },
+  modalCloseBtn: {
+    padding: 4,
+  },
+  modalCloseText: {
+    fontSize: 18,
+    fontWeight: '600',
+    color: COLORS.textMuted,
+  },
+  modalSubtitle: {
+    fontSize: 12,
+    color: COLORS.textMuted,
+    lineHeight: 18,
+    marginTop: 6,
+    marginBottom: SPACING.md,
+  },
+  modalUrlInputWrapper: {
+    backgroundColor: '#F8FAFC',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    borderRadius: RADIUS.md,
+    padding: SPACING.sm + 2,
+    maxHeight: 110,
+  },
+  modalUrlInput: {
+    fontSize: 12,
+    color: COLORS.textDark,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    padding: 0,
+  },
+  copiedBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    alignSelf: 'center',
+    gap: 6,
+    backgroundColor: '#DCFCE7',
+    paddingHorizontal: 12,
+    paddingVertical: 5,
+    borderRadius: RADIUS.full,
+    marginTop: 10,
+  },
+  copiedBadgeText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#16A34A',
+  },
+  modalBtnRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginTop: SPACING.lg,
+  },
+  modalActionBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 12,
+    borderRadius: RADIUS.md,
+  },
+  modalCopyBtn: {
+    backgroundColor: '#EEF2FF',
+    borderWidth: 1,
+    borderColor: '#C7D2FE',
+  },
+  modalCopyBtnActive: {
+    backgroundColor: '#16A34A',
+    borderColor: '#16A34A',
+  },
+  modalCopyBtnText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: COLORS.primaryNavy,
+  },
+  modalShareBtn: {
+    backgroundColor: COLORS.primaryNavy,
+  },
+  modalShareBtnText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#FFFFFF',
   },
 });

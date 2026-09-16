@@ -1,31 +1,44 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View,
   Text,
   StyleSheet,
   ScrollView,
   TouchableOpacity,
-  TextInput,
-  Image,
   Alert,
-  ActivityIndicator,
   Modal,
+  TextInput,
+  ActivityIndicator,
 } from 'react-native';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useNavigation } from '@react-navigation/native';
 import { useAuthStore } from '../../store/authStore';
 import { useWhatsAppStore } from '../../store/whatsappStore';
+import { useTaskStore } from '../../store/taskStore';
 import { COLORS, SPACING, RADIUS } from '../../constants/theme';
 import { Icon } from '../../components/common/Icon';
+import { Header } from '../../components/common/Header';
 
 export const SettingsScreen: React.FC = () => {
-  const insets = useSafeAreaInsets();
-  const { user, serverUrl, setServerUrl, testServerConnection, logout } = useAuthStore();
-  const { isConnected, phone, name } = useWhatsAppStore();
+  const navigation = useNavigation<any>();
+  const { user, logout, createUser } = useAuthStore();
+  const { isConnected, phone, name, fetchStatus } = useWhatsAppStore();
+  const { teamMembers, fetchTeamMembers } = useTaskStore();
 
-  const [showIpModal, setShowIpModal] = useState(false);
-  const [customIp, setCustomIp] = useState(serverUrl);
-  const [testResult, setTestResult] = useState<string | null>(null);
-  const [isTesting, setIsTesting] = useState(false);
+  // User List Collapse/Expand State
+  const [isUserListExpanded, setIsUserListExpanded] = useState(true);
+
+  // Add User Modal State
+  const [showAddModal, setShowAddModal] = useState(false);
+  const [newName, setNewName] = useState('');
+  const [newEmail, setNewEmail] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [newRole, setNewRole] = useState<'user' | 'admin'>('user');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  useEffect(() => {
+    fetchTeamMembers();
+    fetchStatus();
+  }, []);
 
   const handleLogout = () => {
     Alert.alert(
@@ -44,315 +57,590 @@ export const SettingsScreen: React.FC = () => {
     );
   };
 
-  const handleTestConnection = async () => {
-    setIsTesting(true);
-    setTestResult('Testing connection...');
-    const res = await testServerConnection(customIp);
-    setIsTesting(false);
-    setTestResult(res.message);
-  };
-
-  const handleSaveIp = async () => {
-    if (!customIp.trim()) {
-      Alert.alert('Invalid Address', 'Server URL cannot be empty.');
+  const handleCreateUser = async () => {
+    if (!newName.trim() || !newEmail.trim() || !newPassword.trim()) {
+      Alert.alert('Required Fields', 'Please enter full name, email address, and password.');
       return;
     }
-    await setServerUrl(customIp);
-    setShowIpModal(false);
-    Alert.alert('Saved', `Server URL updated to:\n${customIp}`);
+
+    try {
+      setIsSubmitting(true);
+      const res = await createUser(newName.trim(), newEmail.trim(), newPassword.trim(), newRole);
+      if (res.success) {
+        Alert.alert('Success', res.message || 'User created successfully.');
+        setShowAddModal(false);
+        setNewName('');
+        setNewEmail('');
+        setNewPassword('');
+        setNewRole('user');
+        await fetchTeamMembers();
+      } else {
+        Alert.alert('Error', res.message || 'Failed to create user.');
+      }
+    } catch (err: any) {
+      Alert.alert('Error', err.message || 'Something went wrong.');
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
+  const isAdmin = user?.role?.toLowerCase() === 'admin';
+
   return (
-    <ScrollView contentContainerStyle={styles.container} showsVerticalScrollIndicator={false}>
-      {/* Header */}
-      <View style={[styles.header, { paddingTop: Math.max(insets.top, 20) + 12 }]}>
-        <View>
-          <Text style={styles.headerTitle}>Settings</Text>
-          <Text style={styles.headerSub}>Staff profile and portal configuration</Text>
+    <View style={styles.screenWrapper}>
+      {/* Reusable Header */}
+      <Header
+        title="Settings"
+        onBack={() => navigation.navigate('Home')}
+      />
+
+      <ScrollView
+        contentContainerStyle={styles.container}
+        showsVerticalScrollIndicator={false}
+      >
+        {/* Profile Hero Card */}
+        <View style={styles.card}>
+          <View style={styles.profileRow}>
+            <View style={styles.profileAvatarBox}>
+              <Text style={styles.profileAvatarText}>
+                {user?.name?.trim() ? user.name.trim()[0].toUpperCase() : 'U'}
+              </Text>
+            </View>
+            <View style={styles.profileInfoCol}>
+              <Text style={styles.profileName} numberOfLines={1}>
+                {user?.name || 'Staff Member'}
+              </Text>
+              <Text style={styles.profileEmail} numberOfLines={1}>
+                {user?.email || 'staff@jeenmate.com'}
+              </Text>
+              <View style={styles.roleBadgeRow}>
+                <View style={styles.roleBadge}>
+                  <Icon name="shield" size={11} color={COLORS.primary} />
+                  <Text style={styles.roleBadgeText}>
+                    {user?.role?.toUpperCase() || 'STAFF'}
+                  </Text>
+                </View>
+              </View>
+            </View>
+          </View>
         </View>
 
-        {/* Prominent Header Logout Button as requested */}
-        <TouchableOpacity
-          style={styles.headerLogoutBtn}
-          onPress={handleLogout}
-          activeOpacity={0.8}
-        >
-          <Icon name="logout" size={16} color={COLORS.accentRed} />
-          <Text style={styles.headerLogoutText}>Logout</Text>
-        </TouchableOpacity>
-      </View>
-
-      {/* Staff User Information Card */}
-      <View style={styles.card}>
-        <Text style={styles.sectionHeading}>User Information</Text>
-
-        <View style={styles.profileRow}>
-          <View style={styles.avatarContainer}>
-            {user?.avatar ? (
-              <Image source={{ uri: user.avatar }} style={styles.avatar} />
-            ) : (
-              <View style={styles.avatarPlaceholder}>
-                <Text style={styles.avatarInitial}>
-                  {user?.name ? user.name[0].toUpperCase() : 'S'}
+        {/* All-in-One Settings Card (Bottom 3 Cards Combined) */}
+        <View style={styles.allInOneCard}>
+          {/* 1. WhatsApp Connection Section */}
+          <View style={styles.cardSection}>
+            <View style={styles.cardHeaderRow}>
+              <View style={styles.cardHeaderLeft}>
+                <View style={styles.cardHeaderIconBoxWA}>
+                  <Icon name="phone" size={15} color={COLORS.whatsappGreen} />
+                </View>
+                <Text style={styles.cardSectionTitle}>WhatsApp Connection</Text>
+              </View>
+              <View style={[styles.waStatusBadge, isConnected ? styles.waStatusBadgeOnline : styles.waStatusBadgeOffline]}>
+                <View style={[styles.waDot, isConnected ? styles.waDotOnline : styles.waDotOffline]} />
+                <Text style={[styles.waStatusBadgeText, isConnected ? styles.waStatusBadgeTextOnline : styles.waStatusBadgeTextOffline]}>
+                  {isConnected ? 'Active' : 'Offline'}
                 </Text>
               </View>
+            </View>
+
+            <View style={styles.waInfoRow}>
+              <Text style={styles.waStatusLabel}>
+                {isConnected ? 'Connected & Active' : 'Offline / Not Linked'}
+              </Text>
+              <Text style={styles.waPhoneLabel}>
+                Linked Name: {name || ''}
+              </Text>
+              <Text style={styles.waPhoneLabel}>
+                {isConnected ? `Linked Phone: ${phone || 'Active'}` : 'Link WhatsApp to sync live customer chats'}
+              </Text>
+            </View>
+
+            <TouchableOpacity
+              style={styles.cardActionRow}
+              onPress={() => navigation.navigate('Link')}
+              activeOpacity={0.7}
+            >
+              <Text style={styles.cardActionText}>Manage Session & QR Code</Text>
+              <Icon name="chevron-right" size={16} color={COLORS.primary} />
+            </TouchableOpacity>
+          </View>
+
+          {/* Divider Border Between Cards */}
+          <View style={styles.sectionDividerBorder} />
+
+          {/* 2. Users / Team Members Section */}
+          <View style={styles.cardSection}>
+            <View style={styles.userListHeaderRow}>
+              <TouchableOpacity
+                style={styles.cardHeaderLeft}
+                onPress={() => setIsUserListExpanded(!isUserListExpanded)}
+                activeOpacity={0.7}
+              >
+                <View style={styles.cardHeaderIconBoxUsers}>
+                  <Icon name="users" size={15} color={COLORS.primary} />
+                </View>
+                <Text style={styles.cardSectionTitle}>User List</Text>
+              </TouchableOpacity>
+
+              <View style={styles.userListHeaderRight}>
+                {isAdmin && (
+                  <TouchableOpacity
+                    style={styles.addUserBtn}
+                    onPress={() => setShowAddModal(true)}
+                    activeOpacity={0.7}
+                  >
+                    <Icon name="plus" size={12} color={COLORS.primary} />
+                    <Text style={styles.addUserBtnText}>Create User</Text>
+                  </TouchableOpacity>
+                )}
+
+                <TouchableOpacity
+                  style={styles.collapseArrowBtn}
+                  onPress={() => setIsUserListExpanded(!isUserListExpanded)}
+                  activeOpacity={0.7}
+                >
+                  <Icon
+                    name={isUserListExpanded ? 'chevron-up' : 'chevron-down'}
+                    size={18}
+                    color={COLORS.textMuted}
+                  />
+                </TouchableOpacity>
+              </View>
+            </View>
+
+            {/* User List with Collapse & Max Height Scroll */}
+            {isUserListExpanded && (
+              <ScrollView
+                style={styles.userListScrollContainer}
+                contentContainerStyle={styles.userListContainer}
+                nestedScrollEnabled={true}
+                showsVerticalScrollIndicator={false}
+              >
+                {teamMembers.map((member, index) => {
+                  const isCurrent = user?.email?.toLowerCase() === member.email?.toLowerCase();
+                  const memberIsAdmin = member.role?.toLowerCase() === 'admin';
+                  const initial = member.name?.trim() ? member.name.trim()[0].toUpperCase() : 'U';
+
+                  return (
+                    <View
+                      key={member.id || index}
+                      style={[styles.userRow, index > 0 && styles.userRowBorder]}
+                    >
+                      <View
+                        style={[
+                          styles.userAvatar,
+                          memberIsAdmin ? styles.userAvatarAdmin : styles.userAvatarStaff,
+                        ]}
+                      >
+                        <Text
+                          style={[
+                            styles.userAvatarText,
+                            memberIsAdmin ? styles.userAvatarTextAdmin : styles.userAvatarTextStaff,
+                          ]}
+                        >
+                          {initial}
+                        </Text>
+                      </View>
+
+                      <View style={styles.userInfoCol}>
+                        <View style={styles.userNameRow}>
+                          <Text style={styles.userName} numberOfLines={1}>
+                            {member.name}
+                          </Text>
+                          {isCurrent && (
+                            <View style={styles.youBadge}>
+                              <Text style={styles.youBadgeText}>You</Text>
+                            </View>
+                          )}
+                        </View>
+                      </View>
+
+                      <View
+                        style={[
+                          styles.userRoleBadge,
+                          memberIsAdmin ? styles.userRoleBadgeAdmin : styles.userRoleBadgeStaff,
+                        ]}
+                      >
+                        {memberIsAdmin && <Icon name="shield" size={10} color="#7E22CE" />}
+                        <Text
+                          style={[
+                            styles.userRoleText,
+                            memberIsAdmin ? styles.userRoleTextAdmin : styles.userRoleTextStaff,
+                          ]}
+                        >
+                          {member.role ? member.role.toUpperCase() : 'STAFF'}
+                        </Text>
+                      </View>
+                    </View>
+                  );
+                })}
+              </ScrollView>
             )}
           </View>
 
-          <View style={styles.profileDetails}>
-            <Text style={styles.userName}>{user?.name || 'Support Staff'}</Text>
-            <Text style={styles.userEmail}>{user?.email || 'staff@support.com'}</Text>
-            <View style={styles.roleBadge}>
-              <Text style={styles.roleText}>{user?.role?.toUpperCase() || 'STAFF PORTAL'}</Text>
+          {/* Divider Border Between Cards */}
+          <View style={styles.sectionDividerBorder} />
+
+          {/* 3. Preferences Section (Theme & Notification - Text Only) */}
+          <View style={styles.cardSection}>
+            <View style={styles.cardHeaderRow}>
+              <View style={styles.cardHeaderLeft}>
+                <View style={styles.cardHeaderIconBoxPref}>
+                  <Icon name="settings" size={15} color={COLORS.primary} />
+                </View>
+                <Text style={styles.cardSectionTitle}>Preferences</Text>
+              </View>
+            </View>
+
+            {/* Theme Option (Text Only) */}
+            <View style={styles.prefRow}>
+              <View style={styles.prefLeft}>
+                <View style={styles.prefIconBoxTheme}>
+                  <Icon name="moon" size={15} color="#6366F1" />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.prefTitle}>Theme</Text>
+                  <Text style={styles.prefSubtitle}>Light mode</Text>
+                </View>
+              </View>
+              <View style={styles.prefRight}>
+                <Text style={styles.prefValueText}>Light</Text>
+                <Icon name="chevron-right" size={15} color={COLORS.textMuted} />
+              </View>
+            </View>
+
+            {/* Divider */}
+            <View style={styles.prefDivider} />
+
+            {/* Notification Option (Text Only) */}
+            <View style={styles.prefRow}>
+              <View style={styles.prefLeft}>
+                <View style={styles.prefIconBoxNotif}>
+                  <Icon name="bell" size={15} color="#D97706" />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.prefTitle}>Notifications</Text>
+                  <Text style={styles.prefSubtitle}>Messages, calls & alerts</Text>
+                </View>
+              </View>
+              <View style={styles.prefRight}>
+                <Text style={styles.prefValueText}>Enabled</Text>
+                <Icon name="chevron-right" size={15} color={COLORS.textMuted} />
+              </View>
             </View>
           </View>
         </View>
-      </View>
 
-      {/* WhatsApp Link Quick Info */}
-      <View style={styles.card}>
-        <Text style={styles.sectionHeading}>WhatsApp Status</Text>
-        <View style={styles.waStatusRow}>
-          <View style={[styles.waDot, isConnected ? styles.waDotOnline : styles.waDotOffline]} />
-          <View style={{ flex: 1 }}>
-            <Text style={styles.waStatusText}>
-              {isConnected ? 'WhatsApp Session Active' : 'Waiting for QR Session'}
-            </Text>
-            <Text style={styles.waPhoneText}>
-              {isConnected ? `Linked Phone: ${phone || name || 'Active'}` : 'Not currently connected'}
-            </Text>
-          </View>
-        </View>
-      </View>
+        {/* Logout Card Button */}
+        <TouchableOpacity
+          style={styles.logoutCard}
+          onPress={handleLogout}
+          activeOpacity={0.8}
+        >
+          <Icon name="logout" size={17} color={COLORS.accentRed} />
+          <Text style={styles.logoutCardText}>Sign Out</Text>
+        </TouchableOpacity>
 
-      {/* Dynamic Backend Server URL Selector */}
-      <View style={styles.card}>
-        <Text style={styles.sectionHeading}>Network & Backend Server</Text>
-        <Text style={styles.cardDesc}>
-          Configure the active server endpoint. Works across LAN WiFi and remote APK builds without
-          needing to recompile.
-        </Text>
+        {/* App Version Info */}
+        <Text style={styles.versionText}>jeenMate Mobile App • v1.0.0</Text>
+      </ScrollView>
 
-        <View style={styles.serverBox}>
-          <View style={{ flex: 1 }}>
-            <Text style={styles.serverUrlLabel}>Active Backend URL</Text>
-            <Text style={styles.serverUrlText} numberOfLines={1}>
-              {serverUrl}
-            </Text>
-          </View>
-          <TouchableOpacity
-            style={styles.editIpBtn}
-            onPress={() => {
-              setCustomIp(serverUrl);
-              setTestResult(null);
-              setShowIpModal(true);
-            }}
-          >
-            <Text style={styles.editIpBtnText}>Edit IP</Text>
-          </TouchableOpacity>
-        </View>
-      </View>
-
-      {/* Prominent Full Logout Button */}
-      <TouchableOpacity
-        style={styles.fullLogoutButton}
-        onPress={handleLogout}
-        activeOpacity={0.85}
-      >
-        <Icon name="logout" size={18} color={COLORS.bgWhite} />
-        <Text style={styles.fullLogoutButtonText}>Sign Out of Staff Account</Text>
-      </TouchableOpacity>
-
-      <Text style={styles.footerVersion}>jeenMate Mobile App v1.0.0 (Build 11.09.2026)</Text>
-
-      {/* Server IP Edit Modal */}
+      {/* Add User Modal */}
       <Modal
-        visible={showIpModal}
+        visible={showAddModal}
         transparent
         animationType="fade"
-        onRequestClose={() => setShowIpModal(false)}
+        onRequestClose={() => {
+          if (!isSubmitting) setShowAddModal(false);
+        }}
       >
         <View style={styles.modalOverlay}>
           <View style={styles.modalCard}>
-            <Text style={styles.modalTitle}>Change Backend Server</Text>
+            <View style={styles.modalHeaderRow}>
+              <View style={styles.modalHeaderIconBox}>
+                <Icon name="user-plus" size={18} color={COLORS.primary} />
+              </View>
+              <Text style={styles.modalTitle}>Add New User</Text>
+            </View>
             <Text style={styles.modalSub}>
-              Enter your backend computer's LAN IP address (e.g. http://192.168.1.9:5001)
+              Create a new staff or administrator account for jeenMate.
             </Text>
 
+            {/* Name Input */}
+            <Text style={styles.inputLabel}>Full Name</Text>
             <TextInput
               style={styles.modalInput}
-              value={customIp}
-              onChangeText={setCustomIp}
-              placeholder="http://192.168.1.9:5001"
-              placeholderTextColor={COLORS.textSubtle}
-              autoCapitalize="none"
-              autoCorrect={false}
+              value={newName}
+              onChangeText={setNewName}
+              placeholder="e.g. Rahul Sharma"
+              placeholderTextColor={COLORS.textMuted}
+              editable={!isSubmitting}
             />
 
-            {testResult ? (
-              <Text
-                style={[
-                  styles.testStatusText,
-                  testResult.includes('success') || testResult.includes('Connected')
-                    ? { color: COLORS.whatsappGreen }
-                    : { color: COLORS.accentRed },
-                ]}
-              >
-                {testResult}
-              </Text>
-            ) : null}
+            {/* Email Input */}
+            <Text style={styles.inputLabel}>Email Address</Text>
+            <TextInput
+              style={styles.modalInput}
+              value={newEmail}
+              onChangeText={setNewEmail}
+              placeholder="e.g. rahul@jeenmate.com"
+              placeholderTextColor={COLORS.textMuted}
+              keyboardType="email-address"
+              autoCapitalize="none"
+              editable={!isSubmitting}
+            />
 
-            <View style={styles.modalBtnRow}>
+            {/* Password Input */}
+            <Text style={styles.inputLabel}>Password</Text>
+            <TextInput
+              style={styles.modalInput}
+              value={newPassword}
+              onChangeText={setNewPassword}
+              placeholder="Temporary password"
+              placeholderTextColor={COLORS.textMuted}
+              secureTextEntry
+              editable={!isSubmitting}
+            />
+
+            {/* Role Selection */}
+            <Text style={styles.inputLabel}>Role</Text>
+            <View style={styles.rolePickerRow}>
               <TouchableOpacity
-                style={styles.modalTestBtn}
-                onPress={handleTestConnection}
-                disabled={isTesting}
+                style={[
+                  styles.rolePickerBtn,
+                  newRole === 'user' && styles.rolePickerBtnActive,
+                ]}
+                onPress={() => setNewRole('user')}
+                disabled={isSubmitting}
               >
-                {isTesting ? (
-                  <ActivityIndicator size="small" color={COLORS.primary} />
-                ) : (
-                  <Text style={styles.modalTestBtnText}>Test Connection</Text>
-                )}
+                <Text
+                  style={[
+                    styles.rolePickerBtnText,
+                    newRole === 'user' && styles.rolePickerBtnTextActive,
+                  ]}
+                >
+                  Staff
+                </Text>
               </TouchableOpacity>
 
-              <TouchableOpacity style={styles.modalSaveBtn} onPress={handleSaveIp}>
-                <Text style={styles.modalSaveBtnText}>Save</Text>
+              <TouchableOpacity
+                style={[
+                  styles.rolePickerBtn,
+                  newRole === 'admin' && styles.rolePickerBtnActive,
+                ]}
+                onPress={() => setNewRole('admin')}
+                disabled={isSubmitting}
+              >
+                <Text
+                  style={[
+                    styles.rolePickerBtnText,
+                    newRole === 'admin' && styles.rolePickerBtnTextActive,
+                  ]}
+                >
+                  Admin
+                </Text>
               </TouchableOpacity>
             </View>
 
-            <TouchableOpacity style={styles.modalCancelBtn} onPress={() => setShowIpModal(false)}>
-              <Text style={styles.modalCancelBtnText}>Cancel</Text>
-            </TouchableOpacity>
+            {/* Action Buttons */}
+            <View style={styles.modalBtnRow}>
+              <TouchableOpacity
+                style={styles.modalCancelBtn}
+                onPress={() => setShowAddModal(false)}
+                disabled={isSubmitting}
+              >
+                <Text style={styles.modalCancelBtnText}>Cancel</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={styles.modalCreateBtn}
+                onPress={handleCreateUser}
+                disabled={isSubmitting}
+              >
+                {isSubmitting ? (
+                  <ActivityIndicator size="small" color={COLORS.bgWhite} />
+                ) : (
+                  <Text style={styles.modalCreateBtnText}>Create User</Text>
+                )}
+              </TouchableOpacity>
+            </View>
           </View>
         </View>
       </Modal>
-    </ScrollView>
+    </View>
   );
 };
 
 const styles = StyleSheet.create({
+  screenWrapper: {
+    flex: 1,
+    backgroundColor: '#F8FAFC',
+  },
   container: {
-    padding: SPACING.lg,
-    paddingBottom: SPACING.xxxl,
-    backgroundColor: COLORS.bgLinen,
+    padding: 16,
+    paddingBottom: 36,
+    gap: 12,
   },
-  header: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingTop: SPACING.md,
-    marginBottom: SPACING.lg,
-  },
-  headerTitle: {
-    fontSize: 22,
-    fontWeight: '800',
-    color: COLORS.primaryNavy,
-  },
-  headerSub: {
-    fontSize: 12,
-    color: COLORS.textMuted,
-    marginTop: 2,
-  },
-  headerLogoutBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#FEE2E2',
-    paddingHorizontal: 12,
-    paddingVertical: 7,
-    borderRadius: RADIUS.md,
-    gap: 6,
-    borderWidth: 1,
-    borderColor: '#FECACA',
-  },
-  headerLogoutText: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: COLORS.accentRed,
-  },
-  card: {
+
+  // Profile Card
+  profileCard: {
     backgroundColor: COLORS.bgWhite,
-    borderRadius: RADIUS.xl,
-    padding: SPACING.lg,
-    marginBottom: SPACING.md,
+    borderRadius: 16,
+    padding: 16,
     borderWidth: 1,
-    borderColor: COLORS.borderColor,
-    shadowColor: COLORS.shadowColor,
-    shadowOffset: { width: 0, height: 2 },
+    borderColor: '#E2E8F0',
+    shadowColor: '#0F172A',
+    shadowOffset: { width: 0, height: 1 },
     shadowOpacity: 0.04,
-    shadowRadius: 6,
-    elevation: 2,
-  },
-  sectionHeading: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: COLORS.textMuted,
-    textTransform: 'uppercase',
-    letterSpacing: 0.5,
-    marginBottom: SPACING.md,
+    shadowRadius: 5,
+    elevation: 1.5,
   },
   profileRow: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 14,
   },
-  avatarContainer: {
-    width: 60,
-    height: 60,
-    borderRadius: 30,
-    overflow: 'hidden',
-    backgroundColor: COLORS.primary,
-  },
-  avatar: {
-    width: '100%',
-    height: '100%',
-  },
-  avatarPlaceholder: {
-    width: '100%',
-    height: '100%',
+  profileAvatarBox: {
+    width: 52,
+    height: 52,
+    borderRadius: 26,
+    backgroundColor: COLORS.primaryNavy,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: COLORS.primaryNavy,
   },
-  avatarInitial: {
+  profileAvatarText: {
     color: COLORS.bgWhite,
     fontSize: 22,
     fontWeight: '800',
   },
-  profileDetails: {
+  profileInfoCol: {
     flex: 1,
   },
-  userName: {
-    fontSize: 17,
+  profileName: {
+    fontSize: 16,
     fontWeight: '800',
-    color: COLORS.textDark,
+    color: COLORS.primaryNavy,
   },
-  userEmail: {
-    fontSize: 13,
+  profileEmail: {
+    fontSize: 12,
     color: COLORS.textMuted,
     marginTop: 2,
   },
-  roleBadge: {
-    alignSelf: 'flex-start',
-    backgroundColor: 'rgba(26, 59, 113, 0.08)',
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: RADIUS.sm,
-    marginTop: 6,
-  },
-  roleText: {
-    fontSize: 10,
-    fontWeight: '700',
-    color: COLORS.primary,
-  },
-  waStatusRow: {
+  roleBadgeRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 12,
+    marginTop: 6,
+  },
+  roleBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    backgroundColor: '#EEF2F6',
+    paddingHorizontal: 9,
+    paddingVertical: 3,
+    borderRadius: RADIUS.full,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+  },
+  roleBadgeText: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: COLORS.primary,
+    letterSpacing: 0.4,
+  },
+
+  // Base Card Style
+  card: {
+    backgroundColor: COLORS.bgWhite,
+    borderRadius: 16,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    shadowColor: '#0F172A',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.04,
+    shadowRadius: 5,
+    elevation: 1.5,
+  },
+  allInOneCard: {
+    backgroundColor: COLORS.bgWhite,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    shadowColor: '#0F172A',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.04,
+    shadowRadius: 5,
+    elevation: 1.5,
+    overflow: 'hidden',
+  },
+  cardSection: {
+    padding: 16,
+  },
+  sectionDividerBorder: {
+    height: 1,
+    backgroundColor: '#E2E8F0',
+  },
+  cardHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 10,
+  },
+  cardHeaderLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    flex: 1,
+  },
+  cardHeaderIconBoxWA: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: COLORS.whatsappLight,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  cardSectionTitle: {
+    fontSize: 14,
+    fontWeight: '800',
+    color: COLORS.primaryNavy,
+  },
+
+  // WhatsApp Connection Card
+  waStatusBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: RADIUS.full,
+  },
+  waStatusBadgeOnline: {
+    backgroundColor: '#DCFCE7',
+  },
+  waStatusBadgeOffline: {
+    backgroundColor: '#FEF3C7',
+  },
+  waStatusBadgeText: {
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  waStatusBadgeTextOnline: {
+    color: '#15803D',
+  },
+  waStatusBadgeTextOffline: {
+    color: '#B45309',
+  },
+  waInfoRow: {
+    marginTop: 2,
+    marginBottom: 4,
   },
   waDot: {
-    width: 10,
-    height: 10,
-    borderRadius: 5,
+    width: 7,
+    height: 7,
+    borderRadius: 4,
   },
   waDotOnline: {
     backgroundColor: COLORS.whatsappGreen,
@@ -360,84 +648,283 @@ const styles = StyleSheet.create({
   waDotOffline: {
     backgroundColor: '#EAB308',
   },
-  waStatusText: {
-    fontSize: 14,
+  waStatusLabel: {
+    fontSize: 13,
     fontWeight: '700',
     color: COLORS.textDark,
   },
-  waPhoneText: {
+  waNameLabel: {
     fontSize: 12,
-    color: COLORS.textMuted,
-    marginTop: 2,
-  },
-  cardDesc: {
-    fontSize: 12,
-    color: COLORS.textMuted,
-    lineHeight: 18,
-    marginBottom: SPACING.md,
-  },
-  serverBox: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    backgroundColor: COLORS.bgLinen,
-    borderRadius: RADIUS.md,
-    padding: SPACING.md,
-    borderWidth: 1,
-    borderColor: COLORS.borderColor,
-    gap: 10,
-  },
-  serverUrlLabel: {
-    fontSize: 10,
     fontWeight: '700',
-    color: COLORS.textMuted,
-    textTransform: 'uppercase',
-  },
-  serverUrlText: {
-    fontSize: 13,
-    fontWeight: '600',
     color: COLORS.primaryNavy,
     marginTop: 2,
   },
-  editIpBtn: {
-    backgroundColor: COLORS.bgWhite,
-    paddingHorizontal: 12,
-    paddingVertical: 7,
-    borderRadius: RADIUS.sm,
-    borderWidth: 1,
-    borderColor: COLORS.borderColor,
+  waPhoneLabel: {
+    fontSize: 11,
+    color: COLORS.textMuted,
+    marginTop: 2,
   },
-  editIpBtnText: {
+  cardActionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingTop: 12,
+    marginTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: '#F1F5F9',
+  },
+  cardActionText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: COLORS.primary,
+  },
+
+  // User List Section
+  userListHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 8,
+  },
+  userListHeaderLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  cardHeaderIconBoxUsers: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: '#EEF2F6',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  userListHeaderRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  collapseArrowBtn: {
+    width: 28,
+    height: 28,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 14,
+  },
+  addUserBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    backgroundColor: '#EFF6FF',
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: RADIUS.full,
+    borderWidth: 1,
+    borderColor: '#BFDBFE',
+  },
+  addUserBtnText: {
     fontSize: 12,
     fontWeight: '700',
     color: COLORS.primary,
   },
-  fullLogoutButton: {
-    backgroundColor: COLORS.accentRed,
-    height: 50,
-    borderRadius: RADIUS.lg,
+  userListScrollContainer: {
+    maxHeight: 220,
+    marginTop: 4,
+  },
+  userListContainer: {
+    marginTop: 2,
+    paddingRight: 2,
+  },
+  userRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 9,
+    gap: 12,
+  },
+  userRowBorder: {
+    borderTopWidth: 1,
+    borderTopColor: '#F1F5F9',
+  },
+  userAvatar: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  userAvatarAdmin: {
+    backgroundColor: '#FAF5FF',
+    borderWidth: 1,
+    borderColor: '#E9D5FF',
+  },
+  userAvatarStaff: {
+    backgroundColor: '#EFF6FF',
+    borderWidth: 1,
+    borderColor: '#DBEAFE',
+  },
+  userAvatarText: {
+    fontSize: 14,
+    fontWeight: '800',
+  },
+  userAvatarTextAdmin: {
+    color: '#7E22CE',
+  },
+  userAvatarTextStaff: {
+    color: COLORS.primary,
+  },
+  userInfoCol: {
+    flex: 1,
+  },
+  userNameRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  userName: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: COLORS.primaryNavy,
+  },
+  youBadge: {
+    backgroundColor: '#DCFCE7',
+    paddingHorizontal: 6,
+    paddingVertical: 1,
+    borderRadius: RADIUS.full,
+  },
+  youBadgeText: {
+    fontSize: 9,
+    fontWeight: '800',
+    color: '#15803D',
+  },
+  userEmail: {
+    fontSize: 11,
+    color: COLORS.textMuted,
+    marginTop: 2,
+  },
+  userRoleBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: RADIUS.full,
+    borderWidth: 1,
+  },
+  userRoleBadgeAdmin: {
+    backgroundColor: '#FAF5FF',
+    borderColor: '#E9D5FF',
+  },
+  userRoleBadgeStaff: {
+    backgroundColor: '#F8FAFC',
+    borderColor: '#E2E8F0',
+  },
+  userRoleText: {
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 0.3,
+  },
+  userRoleTextAdmin: {
+    color: '#7E22CE',
+  },
+  userRoleTextStaff: {
+    color: '#64748B',
+  },
+
+  // Preferences Section
+  cardHeaderIconBoxPref: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: '#EEF2F6',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  prefRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 9,
+  },
+  prefLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    flex: 1,
+  },
+  prefIconBoxTheme: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: '#EEF2FF',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  prefIconBoxNotif: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: '#FEF3C7',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  prefTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: COLORS.primaryNavy,
+  },
+  prefSubtitle: {
+    fontSize: 11,
+    color: COLORS.textMuted,
+    marginTop: 2,
+  },
+  prefRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  prefValueText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: COLORS.textMuted,
+  },
+  prefDivider: {
+    height: 1,
+    backgroundColor: '#F1F5F9',
+    marginVertical: 4,
+  },
+
+  // Logout Card
+  logoutCard: {
+    backgroundColor: '#FEF2F2',
+    height: 48,
+    borderRadius: 16,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    marginTop: SPACING.lg,
+    marginTop: 2,
     gap: 8,
+    borderWidth: 1,
+    borderColor: '#FECACA',
     shadowColor: COLORS.accentRed,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.25,
-    shadowRadius: 8,
-    elevation: 3,
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.04,
+    shadowRadius: 3,
+    elevation: 1,
   },
-  fullLogoutButtonText: {
-    color: COLORS.bgWhite,
-    fontSize: 15,
+  logoutCardText: {
+    color: COLORS.accentRed,
+    fontSize: 14,
     fontWeight: '700',
   },
-  footerVersion: {
+  versionText: {
     textAlign: 'center',
-    marginTop: SPACING.xl,
+    marginTop: 6,
     fontSize: 11,
     color: COLORS.textSubtle,
+    fontWeight: '500',
   },
+
+  // Add User Modal
   modalOverlay: {
     flex: 1,
     backgroundColor: 'rgba(7, 15, 30, 0.65)',
@@ -446,58 +933,104 @@ const styles = StyleSheet.create({
   },
   modalCard: {
     backgroundColor: COLORS.bgWhite,
-    borderRadius: RADIUS.xl,
+    borderRadius: 20,
     padding: SPACING.xl,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.15,
+    shadowRadius: 12,
+    elevation: 5,
+  },
+  modalHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  modalHeaderIconBox: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: '#EFF6FF',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   modalTitle: {
     fontSize: 18,
     fontWeight: '800',
-    color: COLORS.textDark,
+    color: COLORS.primaryNavy,
   },
   modalSub: {
     fontSize: 12,
     color: COLORS.textMuted,
     marginTop: 4,
     marginBottom: SPACING.md,
-    lineHeight: 18,
+    lineHeight: 17,
+  },
+  inputLabel: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: COLORS.textDark,
+    marginBottom: 4,
+    marginTop: 6,
   },
   modalInput: {
-    height: 46,
+    height: 44,
     borderWidth: 1,
     borderColor: COLORS.borderColor,
     borderRadius: RADIUS.md,
     paddingHorizontal: 12,
-    fontSize: 14,
+    fontSize: 13,
     color: COLORS.textDark,
-    backgroundColor: COLORS.inputBg,
-    marginBottom: 8,
+    backgroundColor: '#F8FAFC',
+    marginBottom: 6,
   },
-  testStatusText: {
+  rolePickerRow: {
+    flexDirection: 'row',
+    gap: 10,
+    marginTop: 4,
+    marginBottom: 16,
+  },
+  rolePickerBtn: {
+    flex: 1,
+    paddingVertical: 9,
+    borderRadius: RADIUS.md,
+    borderWidth: 1,
+    borderColor: COLORS.borderColor,
+    backgroundColor: '#F8FAFC',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  rolePickerBtnActive: {
+    backgroundColor: COLORS.primaryNavy,
+    borderColor: COLORS.primaryNavy,
+  },
+  rolePickerBtnText: {
     fontSize: 12,
-    fontWeight: '600',
-    marginBottom: 10,
+    fontWeight: '700',
+    color: COLORS.textMuted,
+  },
+  rolePickerBtnTextActive: {
+    color: COLORS.bgWhite,
   },
   modalBtnRow: {
     flexDirection: 'row',
     gap: 10,
-    marginTop: 4,
+    marginTop: 6,
   },
-  modalTestBtn: {
+  modalCancelBtn: {
     flex: 1,
     height: 44,
     borderRadius: RADIUS.md,
-    backgroundColor: COLORS.bgLinen,
+    backgroundColor: '#F1F5F9',
     alignItems: 'center',
     justifyContent: 'center',
-    borderWidth: 1,
-    borderColor: COLORS.borderColor,
   },
-  modalTestBtnText: {
-    color: COLORS.primary,
-    fontSize: 12,
+  modalCancelBtnText: {
+    color: COLORS.textMuted,
+    fontSize: 13,
     fontWeight: '700',
   },
-  modalSaveBtn: {
+  modalCreateBtn: {
     flex: 1,
     height: 44,
     borderRadius: RADIUS.md,
@@ -505,19 +1038,9 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  modalSaveBtnText: {
+  modalCreateBtnText: {
     color: COLORS.bgWhite,
     fontSize: 13,
     fontWeight: '700',
-  },
-  modalCancelBtn: {
-    alignItems: 'center',
-    paddingVertical: 12,
-    marginTop: 4,
-  },
-  modalCancelBtnText: {
-    color: COLORS.textMuted,
-    fontSize: 12,
-    fontWeight: '600',
   },
 });

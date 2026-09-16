@@ -96,7 +96,6 @@ export const useWhatsAppStore = create<WhatsAppSessionState>((set, get) => ({
         qrDataUrl: null,
         isResetting: false,
       });
-      await get().fetchQr();
       return { success: true, message: res.data?.message || 'Session reset successfully' };
     } catch (err: any) {
       set({ isResetting: false });

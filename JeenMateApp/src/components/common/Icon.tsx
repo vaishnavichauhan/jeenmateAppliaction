@@ -23,6 +23,8 @@ interface IconProps {
     | 'user'
     | 'chevron-right'
     | 'chevron-left'
+    | 'chevron-down'
+    | 'chevron-up'
     | 'arrow-left'
     | 'clock'
     | 'send'
@@ -30,10 +32,18 @@ interface IconProps {
     | 'share'
     | 'calendar'
     | 'phone'
+    | 'video'
+    | 'video-call'
+    | 'video-off'
     | 'user-plus'
     | 'shield'
     | 'users'
-    | 'external-link';
+    | 'edit'
+    | 'external-link'
+    | 'bell'
+    | 'moon'
+    | 'theme'
+    | 'qr-code';
   size?: number;
   color?: string;
   strokeWidth?: number;
@@ -74,6 +84,23 @@ export const Icon: React.FC<IconProps> = ({
       return (
         <Svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round">
           <Path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z" />
+        </Svg>
+      );
+
+    case 'video':
+    case 'video-call':
+      return (
+        <Svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round">
+          <Polygon points="23 7 16 12 23 17 23 7" fill={color} />
+          <Rect x="1" y="5" width="15" height="14" rx="2" ry="2" />
+        </Svg>
+      );
+
+    case 'video-off':
+      return (
+        <Svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round">
+          <Path d="M16 16v1a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h2m5.66 0H14a2 2 0 0 1 2 2v3.34l1 1L23 7v10" />
+          <Line x1="1" y1="1" x2="23" y2="23" />
         </Svg>
       );
 
@@ -206,6 +233,20 @@ export const Icon: React.FC<IconProps> = ({
         </Svg>
       );
 
+    case 'chevron-down':
+      return (
+        <Svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round">
+          <Polyline points="6 9 12 15 18 9" />
+        </Svg>
+      );
+
+    case 'chevron-up':
+      return (
+        <Svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round">
+          <Polyline points="18 15 12 9 6 15" />
+        </Svg>
+      );
+
     case 'arrow-left':
       return (
         <Svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round">
@@ -292,6 +333,40 @@ export const Icon: React.FC<IconProps> = ({
           <Path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
           <Polyline points="15 3 21 3 21 9" />
           <Line x1="10" y1="14" x2="21" y2="3" />
+        </Svg>
+      );
+
+    case 'edit':
+      return (
+        <Svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round">
+          <Path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+          <Path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+        </Svg>
+      );
+
+    case 'bell':
+      return (
+        <Svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round">
+          <Path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
+          <Path d="M13.73 21a2 2 0 0 1-3.46 0" />
+        </Svg>
+      );
+
+    case 'moon':
+    case 'theme':
+      return (
+        <Svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round">
+          <Path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+        </Svg>
+      );
+
+    case 'qr-code':
+      return (
+        <Svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round">
+          <Rect x="3" y="3" width="7" height="7" rx="1" />
+          <Rect x="14" y="3" width="7" height="7" rx="1" />
+          <Rect x="14" y="14" width="7" height="7" rx="1" />
+          <Rect x="3" y="14" width="7" height="7" rx="1" />
         </Svg>
       );
 

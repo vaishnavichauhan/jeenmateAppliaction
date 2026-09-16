@@ -56,36 +56,22 @@ async function getCallLogs(req, res, next) {
     const userId = req.user.id;
     const limit = parseInt(req.query.limit, 10) || 50;
 
-    const service = sessionManager.getSession(userId);
-    if (service) {
+    const service = await getUserSession(req);
+    const isConnected = !!(service && service.isConnected);
+
+    if (isConnected) {
       const callLogs = await service.getCallLogs(limit);
       return res.status(200).json({
         success: true,
+        isConnected: true,
         data: callLogs
       });
     }
 
-    // Direct DB query for this user (so user sees their own calls even if offline)
-    const [rows] = await pool.execute(
-      `SELECT 
-        id,
-        call_id as callId,
-        customer_name as customerName,
-        phone_number as phoneNumber,
-        call_type as callType,
-        media_type as mediaType,
-        duration,
-        DATE_FORMAT(created_at, '%Y-%m-%dT%H:%i:%s.000Z') as timestamp
-       FROM whatsapp_calls
-       WHERE user_id = ?
-       ORDER BY created_at DESC, id DESC
-       LIMIT ${limit}`,
-      [userId]
-    );
-
     return res.status(200).json({
       success: true,
-      data: rows
+      isConnected: false,
+      data: []
     });
   } catch (err) {
     next(err);
@@ -358,8 +344,62 @@ async function debugMsgs(req, res) {
     if (!service.client || !service.client.pupPage) {
       return res.json({ success: false, error: 'No pupPage' });
     }
-    const msgs = await service.fetchMessagesForChat(jid, 20);
-    return res.json({ success: true, jid, count: msgs.length, msgs: msgs.slice(-5) });
+
+    const diag = await service.client.pupPage.evaluate(async (targetJid) => {
+      try {
+        let chat = null;
+        if (window.WWebJS && window.WWebJS.getChat) {
+          try {
+            chat = await window.WWebJS.getChat(targetJid, { getAsModel: false });
+          } catch (e) {
+            return { error: 'getChat failed: ' + e.message };
+          }
+        }
+        if (!chat) {
+          const chatCol = window.require ? window.require('WAWebCollections')?.Chat : null;
+          chat = chatCol?.get ? chatCol.get(targetJid) : null;
+        }
+        if (!chat) {
+          return { error: 'Chat not found in collection for JID ' + targetJid };
+        }
+
+        const initialMsgsCount = chat.msgs?.models?.length || (chat.msgs?.getModelsArray ? chat.msgs.getModelsArray().length : 0);
+
+        let loaderError = null;
+        let loadedResults = [];
+        const loader = window.require ? window.require('WAWebChatLoadMessages') : null;
+        if (loader && loader.loadEarlierMsgs) {
+          try {
+            for (let i = 0; i < 3; i++) {
+              const res = await loader.loadEarlierMsgs({ chat });
+              loadedResults.push({ loop: i, resCount: res?.length || 0 });
+              if (!res || !res.length) break;
+            }
+          } catch (le) {
+            loaderError = le.message || String(le);
+          }
+        }
+
+        const finalMsgsCount = chat.msgs?.models?.length || (chat.msgs?.getModelsArray ? chat.msgs.getModelsArray().length : 0);
+        const models = chat.msgs?.getModelsArray ? chat.msgs.getModelsArray() : (chat.msgs?.models || []);
+
+        return {
+          foundChat: true,
+          chatId: chat.id?._serialized,
+          initialMsgsCount,
+          finalMsgsCount,
+          hasLoader: !!loader,
+          loaderError,
+          loadedResults,
+          firstMsg: models[0] ? { id: models[0].id?._serialized, body: models[0].body?.slice(0, 50), t: models[0].t } : null,
+          lastMsg: models[models.length - 1] ? { id: models[models.length - 1].id?._serialized, body: models[models.length - 1].body?.slice(0, 50), t: models[models.length - 1].t } : null
+        };
+      } catch (err) {
+        return { error: err.message };
+      }
+    }, jid);
+
+    return res.json({ success: true, jid, diag });
   } catch (err) {
     return res.status(500).json({ success: false, error: err.message });
   }
@@ -401,6 +441,60 @@ async function syncChatMessages(req, res) {
   }
 }
 
+// POST /api/whatsapp/log-call
+async function logCall(req, res) {
+  try {
+    const userId = req.user.id;
+    const { conversationId, phoneNumber, mediaType = 'voice', callType = 'outgoing' } = req.body;
+    if (!phoneNumber) {
+      return res.status(400).json({ success: false, message: 'phoneNumber is required' });
+    }
+
+    const service = sessionManager.getSession(userId);
+    if (service) {
+      await service.logCallDirectly({ conversationId, phoneNumber, mediaType, callType });
+    } else {
+      const rawNumber = String(phoneNumber).replace(/[^0-9]/g, '');
+      const formattedPhone = rawNumber.startsWith('+') ? rawNumber : `+${rawNumber}`;
+      const mediaLabel = mediaType === 'video' ? 'video' : 'voice';
+      const callMsgText = mediaLabel === 'video'
+        ? (callType === 'missed' ? '📹 Missed video call' : (callType === 'outgoing' ? '📹 Outgoing video call' : '📹 Video call'))
+        : (callType === 'missed' ? '📞 Missed voice call' : (callType === 'outgoing' ? '📞 Outgoing voice call' : '📞 Voice call'));
+
+      await pool.execute(
+        `INSERT INTO whatsapp_calls (call_id, phone_number, customer_name, call_type, media_type, created_at, user_id)
+         VALUES (?, ?, ?, ?, ?, NOW(), ?)`,
+        [`call_manual_${Date.now()}`, formattedPhone, 'Customer', callType, mediaLabel, userId]
+      );
+
+      if (conversationId) {
+        const [convRows] = await pool.execute(
+          'SELECT customer_id FROM conversations WHERE id = ? AND user_id = ? LIMIT 1',
+          [conversationId, userId]
+        );
+        if (convRows.length > 0) {
+          const customerId = convRows[0].customer_id;
+          const utcStr = new Date().toISOString().slice(0, 19).replace('T', ' ');
+          await pool.execute(
+            `INSERT INTO messages (conversation_id, customer_id, direction, message, whatsapp_message_id, message_type, status, created_at, user_id)
+             VALUES (?, ?, 'outgoing', ?, ?, 'text', 'delivered', ?, ?)`,
+            [conversationId, customerId, callMsgText, `call_${Date.now()}`, utcStr, userId]
+          );
+          await pool.execute(
+            'UPDATE conversations SET last_message_at = ? WHERE id = ?',
+            [utcStr, conversationId]
+          );
+        }
+      }
+    }
+
+    return res.status(200).json({ success: true, message: 'Call logged successfully' });
+  } catch (err) {
+    console.error('[WhatsAppController] logCall error:', err.message);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+}
+
 module.exports = {
   getStatus,
   getQr,
@@ -411,5 +505,6 @@ module.exports = {
   getQrPage,
   debugChats,
   debugMsgs,
-  syncChatMessages
+  syncChatMessages,
+  logCall
 };

@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import {
   View,
   Text,
@@ -13,6 +13,9 @@ import {
   Alert,
   Platform,
   Modal,
+  KeyboardAvoidingView,
+  Keyboard,
+  Dimensions,
 } from 'react-native';
 import { useNavigation, useFocusEffect } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -22,6 +25,7 @@ import { useTaskStore, TeamMember } from '../../store/taskStore';
 import { useAuthStore } from '../../store/authStore';
 import { COLORS, SPACING, RADIUS } from '../../constants/theme';
 import { Icon } from '../../components/common/Icon';
+import { Header } from '../../components/common/Header';
 
 export const ChatScreen: React.FC = () => {
   const navigation = useNavigation<any>();
@@ -37,28 +41,54 @@ export const ChatScreen: React.FC = () => {
     setupSocketListeners,
     isLoading,
     isSyncing,
+    clearMessages,
   } = useChatStore();
 
   const { isConnected, fetchStatus: fetchWhatsAppStatus } = useWhatsAppStore();
 
   const [refreshing, setRefreshing] = useState(false);
+  const [visibleCount, setVisibleCount] = useState(10);
+  const [isInitialLoad, setIsInitialLoad] = useState(true);
 
   useEffect(() => {
-    fetchWhatsAppStatus();
-    fetchConversations();
-    setupSocketListeners();
+    setVisibleCount(10);
+  }, [searchQuery]);
+
+  useEffect(() => {
+    let isMounted = true;
+    const init = async () => {
+      setIsInitialLoad(true);
+      await Promise.all([fetchWhatsAppStatus(), fetchConversations()]);
+      if (isMounted) {
+        setIsInitialLoad(false);
+      }
+      setupSocketListeners();
+    };
+    init();
+    return () => {
+      isMounted = false;
+    };
   }, [fetchWhatsAppStatus, fetchConversations, setupSocketListeners]);
 
   useFocusEffect(
     useCallback(() => {
-      fetchWhatsAppStatus();
-      fetchConversations();
+      let isMounted = true;
+      setIsInitialLoad(true);
+      Promise.all([fetchWhatsAppStatus(), fetchConversations()]).finally(() => {
+        if (isMounted) {
+          setIsInitialLoad(false);
+        }
+      });
+      return () => {
+        isMounted = false;
+      };
     }, [fetchWhatsAppStatus, fetchConversations])
   );
 
   const onRefresh = async () => {
     setRefreshing(true);
     await Promise.all([fetchWhatsAppStatus(), fetchConversations()]);
+    setVisibleCount(10);
     setRefreshing(false);
   };
 
@@ -75,6 +105,7 @@ export const ChatScreen: React.FC = () => {
   };
 
   const handleOpenConversation = (conv: Conversation) => {
+    clearMessages();
     setActiveConversation(conv);
     navigation.navigate('ChatDetail', { conversationId: conv.id, customerName: conv.customer_name });
   };
@@ -126,7 +157,16 @@ export const ChatScreen: React.FC = () => {
     if (msg.startsWith('/9j/') || (msg.length > 100 && /^[A-Za-z0-9+/=]+$/.test(msg.slice(0, 40)))) {
       return '📷 Photo';
     }
-    if (msg === '[call_log]') return '📞 Call';
+    const lower = msg.toLowerCase();
+    if (lower.includes('video') && (lower.includes('call') || msg.includes('📹'))) {
+      return lower.includes('missed') ? 'Missed video call' : 'Video call';
+    }
+    if (lower.includes('voice') || lower.includes('call') || msg === '[call_log]' || msg.includes('📞')) {
+      return lower.includes('missed') ? 'Missed voice call' : 'Voice call';
+    }
+    if (msg === 'Images' || msg === 'Image') return '🖼️ Image';
+    if (msg === 'Video') return '🎥 Video';
+    if (msg === 'Voice message') return '🎤 Voice message';
     if (msg === '[gp2]') return 'Group update';
     if (msg === '[e2e_notification]') return 'End-to-end encrypted';
     if (msg === '[notification_template]') return 'Notification';
@@ -155,12 +195,38 @@ export const ChatScreen: React.FC = () => {
     const ampm = hours >= 12 ? 'pm' : 'am';
     hours = hours % 12;
     hours = hours ? hours : 12;
-    return `${hours}:${minutes} ${ampm}`;
+    return `${hours}:${minutes}${ampm}`;
   };
 
   const [taskTime, setTaskTime] = useState(getCurrentTimeStr());
   const [dueDate, setDueDate] = useState(getTodayDateStr());
   const [assignedUser, setAssignedUser] = useState<TeamMember | null>(null);
+  const [assignDropdownOpen, setAssignDropdownOpen] = useState(false);
+  const [isSubmittingTask, setIsSubmittingTask] = useState(false);
+  const modalScrollRef = useRef<any>(null);
+  const [keyboardHeight, setKeyboardHeight] = useState(0);
+
+  useEffect(() => {
+    const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
+    const hideEvent = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
+
+    const showSub = Keyboard.addListener(showEvent, (e) => {
+      setKeyboardHeight(e.endCoordinates.height);
+    });
+    const hideSub = Keyboard.addListener(hideEvent, () => {
+      setKeyboardHeight(0);
+    });
+
+    return () => {
+      showSub.remove();
+      hideSub.remove();
+    };
+  }, []);
+
+  const screenHeight = Dimensions.get('window').height;
+  const modalScrollMaxHeight = keyboardHeight > 0
+    ? Math.max(220, screenHeight - keyboardHeight - 160)
+    : Math.min(540, screenHeight * 0.72);
 
   const availableAssignMembers = teamMembers.filter((m) => {
     if (user) {
@@ -173,28 +239,36 @@ export const ChatScreen: React.FC = () => {
   const handleOpenTaskModalForConv = (conv: Conversation) => {
     fetchTeamMembers();
     setAssignedUser(null);
+    setAssignDropdownOpen(false);
     setDueDate(getTodayDateStr());
     setTaskTime(getCurrentTimeStr());
     setSelectedConv(conv);
-    setStaffNote(`Follow up on chat with ${conv.customer_name}`);
+    setStaffNote('');
     setTaskModalVisible(true);
   };
 
   const handleSaveTask = async () => {
-    if (!selectedConv) return;
-    const combinedDue = taskTime?.trim() ? `${dueDate.trim()} ${taskTime.trim()}` : dueDate.trim();
-    await addTask({
-      customerId: selectedConv.id,
-      customerName: selectedConv.customer_name,
-      customerPhone: selectedConv.phone_number,
-      originalMessage: selectedConv.last_message || 'WhatsApp Chat',
-      staffNote: staffNote,
-      dueDate: combinedDue,
-      assignedToUserId: assignedUser ? assignedUser.id : null,
-    });
-    setAssignedUser(null);
-    setTaskModalVisible(false);
-    Alert.alert('Task Created 📌', `CRM task added for ${selectedConv.customer_name}.`);
+    if (!selectedConv || isSubmittingTask) return;
+    setIsSubmittingTask(true);
+    try {
+      const combinedDue = taskTime?.trim() ? `${dueDate.trim()} ${taskTime.trim()}` : dueDate.trim();
+      await addTask({
+        customerId: selectedConv.id,
+        customerName: selectedConv.customer_name,
+        customerPhone: selectedConv.phone_number,
+        originalMessage: selectedConv.last_message || 'WhatsApp Chat',
+        staffNote: staffNote,
+        dueDate: combinedDue,
+        assignedToUserId: assignedUser ? assignedUser.id : null,
+      });
+      setAssignedUser(null);
+      setTaskModalVisible(false);
+      Alert.alert('Task Created 📌', `CRM task added for ${selectedConv.customer_name}.`);
+    } catch (e: any) {
+      Alert.alert('Error', e?.message || 'Failed to create task');
+    } finally {
+      setIsSubmittingTask(false);
+    }
   };
 
   const renderItem = ({ item }: { item: Conversation }) => {
@@ -268,34 +342,11 @@ export const ChatScreen: React.FC = () => {
 
   return (
     <View style={styles.container}>
-      {/* Top Header */}
-      <View style={[styles.header, { paddingTop: Math.max(insets.top, 20) + 12 }]}>
-        <View style={styles.headerLeft}>
-          <TouchableOpacity
-            style={styles.backButton}
-            onPress={() => navigation.navigate('Home')}
-            activeOpacity={0.7}
-            hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
-          >
-            <Icon name="arrow-left" size={20} color={COLORS.primaryNavy} strokeWidth={2.5} />
-          </TouchableOpacity>
-          <Text style={styles.headerTitle}>WhatsApp Chats</Text>
-        </View>
-
-        <TouchableOpacity
-          style={styles.syncIconButton}
-          onPress={handleSyncChats}
-          disabled={isSyncing}
-          activeOpacity={0.7}
-          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-        >
-          {isSyncing ? (
-            <ActivityIndicator size="small" color={COLORS.primary} />
-          ) : (
-            <Icon name="refresh" size={18} color={COLORS.primaryNavy} strokeWidth={2.2} />
-          )}
-        </TouchableOpacity>
-      </View>
+      {/* Reusable Top Header */}
+      <Header
+        title="WhatsApp Chats"
+        onBack={() => navigation.navigate('Home')}
+      />
 
       {/* If WhatsApp is disconnected, don't show chat list; show "Please link your device" */}
       {!isConnected ? (
@@ -317,9 +368,14 @@ export const ChatScreen: React.FC = () => {
             <Text style={styles.linkDeviceButtonText}>Please Link Your Device</Text>
           </TouchableOpacity>
         </View>
+      ) : isInitialLoad ? (
+        <View style={styles.loadingContainer}>
+          <ActivityIndicator size="large" color={COLORS.primary} />
+          <Text style={styles.loadingText}>Loading conversations...</Text>
+        </View>
       ) : (
         <>
-          {/* Search Bar */}
+          {/* Search Bar & Sync Action */}
           <View style={styles.searchContainer}>
             <View style={styles.searchWrapper}>
               <Icon name="search" size={16} color={COLORS.textMuted} />
@@ -336,11 +392,25 @@ export const ChatScreen: React.FC = () => {
                 </TouchableOpacity>
               ) : null}
             </View>
+
+            <TouchableOpacity
+              style={styles.syncIconButton}
+              onPress={handleSyncChats}
+              disabled={isSyncing}
+              activeOpacity={0.7}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            >
+              {isSyncing ? (
+                <ActivityIndicator size="small" color={COLORS.primary} />
+              ) : (
+                <Icon name="refresh" size={18} color={COLORS.primaryNavy} strokeWidth={2.2} />
+              )}
+            </TouchableOpacity>
           </View>
 
           {/* Conversation List */}
           <FlatList
-            data={filteredConversations}
+            data={filteredConversations.slice(0, visibleCount)}
             keyExtractor={(item) => item.id}
             renderItem={renderItem}
             contentContainerStyle={styles.listContent}
@@ -348,6 +418,19 @@ export const ChatScreen: React.FC = () => {
               <RefreshControl refreshing={refreshing} onRefresh={onRefresh} colors={[COLORS.primary]} />
             }
             ItemSeparatorComponent={() => <View style={styles.separator} />}
+            onEndReached={() => {
+              if (visibleCount < filteredConversations.length) {
+                setVisibleCount((prev) => prev + 10);
+              }
+            }}
+            onEndReachedThreshold={0.5}
+            ListFooterComponent={
+              visibleCount < filteredConversations.length ? (
+                <View style={styles.listFooterLoader}>
+                  <ActivityIndicator size="small" color={COLORS.primary} />
+                </View>
+              ) : undefined
+            }
             ListEmptyComponent={
               <View style={styles.emptyBox}>
                 <Icon name="chat" size={44} color={COLORS.borderColor} />
@@ -363,120 +446,277 @@ export const ChatScreen: React.FC = () => {
         </>
       )}
 
-      {/* Convert Chat to Task Modal */}
+      {/* Create Task Modal */}
       <Modal
         visible={taskModalVisible}
         transparent
         animationType="slide"
-        onRequestClose={() => setTaskModalVisible(false)}
+        onRequestClose={() => {
+          Keyboard.dismiss();
+          setTaskModalVisible(false);
+        }}
       >
-        <View style={styles.modalOverlay}>
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          style={[
+            styles.modalOverlay,
+            Platform.OS === 'android' && keyboardHeight > 0
+              ? { paddingBottom: keyboardHeight }
+              : null,
+          ]}
+        >
+          <TouchableOpacity
+            style={StyleSheet.absoluteFill}
+            activeOpacity={1}
+            onPress={() => {
+              Keyboard.dismiss();
+              if (assignDropdownOpen) setAssignDropdownOpen(false);
+            }}
+          />
           <View style={styles.modalCard}>
+            {/* Header: Title "Create Task" & Close Button */}
             <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>Convert Chat to Task 📌</Text>
-              <TouchableOpacity onPress={() => setTaskModalVisible(false)}>
+              <Text style={styles.modalTitle}>Create Task 📌 </Text>
+              <TouchableOpacity
+                onPress={() => {
+                  Keyboard.dismiss();
+                  setTaskModalVisible(false);
+                }}
+                hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+              >
                 <Text style={styles.modalCloseText}>✕</Text>
               </TouchableOpacity>
             </View>
 
             {selectedConv && (
-              <ScrollView style={{ maxHeight: 460 }} showsVerticalScrollIndicator={false}>
-                <View style={styles.formGroup}>
-                  <Text style={styles.formLabel}>Customer</Text>
-                  <Text style={styles.readOnlyCustomer}>
-                    {selectedConv.customer_name} ({selectedConv.phone_number})
-                  </Text>
-                </View>
+              <ScrollView
+                ref={modalScrollRef}
+                style={{ maxHeight: modalScrollMaxHeight }}
+                contentContainerStyle={{
+                  paddingBottom: keyboardHeight > 0 ? 120 : 36,
+                  flexGrow: 1,
+                }}
+                showsVerticalScrollIndicator={true}
+                keyboardShouldPersistTaps="handled"
+                nestedScrollEnabled={true}
+              >
+                {/* Task Info Section */}
+                <View style={styles.taskInfoSection}>
+                  <Text style={styles.taskInfoHeading}>Task Info</Text>
 
-                <View style={styles.formGroup}>
-                  <Text style={styles.formLabel}>Last Message</Text>
-                  <View style={styles.quoteBoxModal}>
-                    <Text style={styles.quoteBoxText}>"{selectedConv.last_message || 'WhatsApp Chat'}"</Text>
+                  {/* Details Card */}
+                  <View style={styles.infoDetailsBox}>
+                    {/* Name */}
+                    <View style={styles.infoDetailRow}>
+                      <Text style={styles.infoDetailLabel}>Name :</Text>
+                      <Text style={styles.infoDetailValue} numberOfLines={1}>
+                        {selectedConv.customer_name || 'Customer'}
+                      </Text>
+                    </View>
+
+                    {/* Phone Number */}
+                    <View style={styles.infoDetailRow}>
+                      <Text style={styles.infoDetailLabel}>Phone Number :</Text>
+                      <Text style={styles.infoDetailValue}>
+                        {selectedConv.phone_number || 'N/A'}
+                      </Text>
+                    </View>
+
+                    {/* Event Type */}
+                    <View style={[styles.infoDetailRow, { borderBottomWidth: 0, paddingBottom: 0 }]}>
+                      <Text style={styles.infoDetailLabel}>Event Type :</Text>
+                      <Text style={styles.infoDetailValue}>Chat</Text>
+                    </View>
                   </View>
                 </View>
 
+                {/* Date & Time Row */}
+                <View style={styles.dateTimeRow}>
+                  <View style={styles.dateTimeCol}>
+                    <Text style={styles.fieldHeading}>Create Task Date :</Text>
+                    <View style={styles.dateTimeInputContainer}>
+                      <Icon name="calendar" size={14} color={COLORS.primary} />
+                      <TextInput
+                        style={styles.dateTimeInput}
+                        value={dueDate}
+                        onChangeText={setDueDate}
+                        placeholder="DD/MM/YYYY"
+                        placeholderTextColor={COLORS.textSubtle}
+                        onFocus={() => {
+                          setTimeout(() => {
+                            modalScrollRef.current?.scrollTo({ y: 160, animated: true });
+                          }, 180);
+                        }}
+                      />
+                    </View>
+                  </View>
+
+                  <View style={styles.dateTimeCol}>
+                    <Text style={styles.fieldHeading}>Create Task Time :</Text>
+                    <View style={styles.dateTimeInputContainer}>
+                      <Icon name="clock" size={14} color={COLORS.primary} />
+                      <TextInput
+                        style={styles.dateTimeInput}
+                        value={taskTime}
+                        onChangeText={setTaskTime}
+                        placeholder="2:37pm"
+                        placeholderTextColor={COLORS.textSubtle}
+                        onFocus={() => {
+                          setTimeout(() => {
+                            modalScrollRef.current?.scrollTo({ y: 160, animated: true });
+                          }, 180);
+                        }}
+                      />
+                    </View>
+                  </View>
+                </View>
+
+                {/* Our Notes */}
                 <View style={styles.formGroup}>
-                  <Text style={styles.formLabel}>Notes</Text>
+                  <Text style={styles.fieldHeading}>Our Notes:</Text>
                   <TextInput
-                    style={[styles.formInput, { height: 75, textAlignVertical: 'top' }]}
+                    style={styles.notesTextarea}
                     value={staffNote}
                     onChangeText={setStaffNote}
-                    multiline
-                  />
-                </View>
-
-                <View style={styles.formGroup}>
-                  <Text style={styles.formLabel}>Due Date</Text>
-                  <TextInput
-                    style={styles.formInput}
-                    value={dueDate}
-                    onChangeText={setDueDate}
-                    placeholder="DD/MM/YYYY"
+                    placeholder="Write your Notes here (5 to 10 lines).."
                     placeholderTextColor={COLORS.textSubtle}
-                  />
-                </View>
-
-                <View style={styles.formGroup}>
-                  <Text style={styles.formLabel}>Time</Text>
-                  <TextInput
-                    style={styles.formInput}
-                    value={taskTime}
-                    onChangeText={setTaskTime}
-                    placeholder="6:48 pm"
-                    placeholderTextColor={COLORS.textSubtle}
+                    multiline={true}
+                    numberOfLines={6}
+                    textAlignVertical="top"
+                    onFocus={() => {
+                      setTimeout(() => {
+                        modalScrollRef.current?.scrollToEnd({ animated: true });
+                      }, 180);
+                    }}
                   />
                 </View>
 
                 {/* Assign Task To */}
                 <View style={styles.formGroup}>
-                  <Text style={styles.formLabel}>Assign Task To</Text>
-                  <View style={styles.assignChipsContainer}>
-                    <TouchableOpacity
-                      style={[styles.assignChip, !assignedUser && styles.assignChipActive]}
-                      onPress={() => setAssignedUser(null)}
-                      activeOpacity={0.7}
-                    >
-                      <Text style={[styles.assignChipText, !assignedUser && styles.assignChipTextActive]}>
-                        Unassigned
+                  <Text style={styles.fieldHeading}>Assign Task To:</Text>
+                  <TouchableOpacity
+                    style={[
+                      styles.dropdownTrigger,
+                      assignDropdownOpen && styles.dropdownTriggerActive,
+                    ]}
+                    onPress={() => {
+                      Keyboard.dismiss();
+                      fetchTeamMembers();
+                      setAssignDropdownOpen(!assignDropdownOpen);
+                    }}
+                    activeOpacity={0.8}
+                  >
+                    <View style={styles.dropdownTriggerLeft}>
+                      <Text style={styles.dropdownTriggerText} numberOfLines={1}>
+                        {assignedUser ? assignedUser.name : 'Unassigned'}
                       </Text>
-                      {!assignedUser ? (
-                        <Icon name="check" size={12} color={COLORS.primary} strokeWidth={3} />
-                      ) : null}
-                    </TouchableOpacity>
+                    </View>
+                    <Icon
+                      name={assignDropdownOpen ? 'chevron-up' : 'chevron-down'}
+                      size={18}
+                      color={COLORS.textDark}
+                    />
+                  </TouchableOpacity>
 
-                    {availableAssignMembers.map((member) => {
-                      const isSelected = assignedUser?.id === member.id;
-                      return (
-                        <TouchableOpacity
-                          key={member.id}
-                          style={[styles.assignChip, isSelected && styles.assignChipActive]}
-                          onPress={() => setAssignedUser(member)}
-                          activeOpacity={0.7}
-                        >
-                          <View style={[styles.chipAvatar, isSelected && styles.chipAvatarActive]}>
-                            <Text style={[styles.chipAvatarText, isSelected && styles.chipAvatarTextActive]}>
-                              {(member.name || 'U').charAt(0).toUpperCase()}
+                  {/* Dropdown Menu */}
+                  {assignDropdownOpen && (
+                    <View style={styles.dropdownMenu}>
+                      {/* Default Unassigned option */}
+                      <TouchableOpacity
+                        style={[
+                          styles.dropdownItem,
+                          !assignedUser && styles.dropdownItemActive,
+                        ]}
+                        onPress={() => {
+                          setAssignedUser(null);
+                          setAssignDropdownOpen(false);
+                        }}
+                        activeOpacity={0.7}
+                      >
+                        <View style={styles.dropdownItemContent}>
+                          <View>
+                            <Text
+                              style={[
+                                styles.dropdownItemName,
+                                !assignedUser && styles.dropdownItemNameActive,
+                              ]}
+                            >
+                              Unassigned
                             </Text>
+                            <Text style={styles.dropdownItemRole}>Default</Text>
                           </View>
-                          <Text style={[styles.assignChipText, isSelected && styles.assignChipTextActive]}>
-                            {member.name}
+                        </View>
+                        {!assignedUser ? (
+                          <Icon name="check" size={16} color={COLORS.primary} strokeWidth={2.5} />
+                        ) : null}
+                      </TouchableOpacity>
+
+                      {/* Team Member Options */}
+                      {availableAssignMembers.length === 0 ? (
+                        <View style={{ padding: 14, alignItems: 'center' }}>
+                          <Text style={{ fontSize: 13, color: COLORS.textMuted }}>
+                            No other users found
                           </Text>
-                          {isSelected ? (
-                            <Icon name="check" size={12} color={COLORS.primary} strokeWidth={3} />
-                          ) : null}
-                        </TouchableOpacity>
-                      );
-                    })}
-                  </View>
+                        </View>
+                      ) : (
+                        availableAssignMembers.map((member) => {
+                          const isSelected = assignedUser?.id === member.id;
+                          return (
+                            <TouchableOpacity
+                              key={member.id}
+                              style={[
+                                styles.dropdownItem,
+                                isSelected && styles.dropdownItemActive,
+                              ]}
+                              onPress={() => {
+                                setAssignedUser(member);
+                                setAssignDropdownOpen(false);
+                              }}
+                              activeOpacity={0.7}
+                            >
+                              <View style={styles.dropdownItemContent}>
+                                <View>
+                                  <Text
+                                    style={[
+                                      styles.dropdownItemName,
+                                      isSelected && styles.dropdownItemNameActive,
+                                    ]}
+                                  >
+                                    {member.name}
+                                  </Text>
+                                  <Text style={styles.dropdownItemRole}>
+                                    {member.role ? member.role.toUpperCase() : 'USER'}
+                                  </Text>
+                                </View>
+                              </View>
+                              {isSelected ? (
+                                <Icon name="check" size={16} color={COLORS.primary} strokeWidth={2.5} />
+                              ) : null}
+                            </TouchableOpacity>
+                          );
+                        })
+                      )}
+                    </View>
+                  )}
                 </View>
 
-                <TouchableOpacity style={styles.modalSubmitBtn} onPress={handleSaveTask}>
-                  <Text style={styles.modalSubmitText}>Save</Text>
+                {/* Submit button */}
+                <TouchableOpacity
+                  style={[styles.modalSubmitBtn, isSubmittingTask && { opacity: 0.7 }]}
+                  onPress={handleSaveTask}
+                  disabled={isSubmittingTask}
+                  activeOpacity={0.85}
+                >
+                  {isSubmittingTask ? (
+                    <ActivityIndicator size="small" color={COLORS.bgWhite} />
+                  ) : (
+                    <Text style={styles.modalSubmitText}>Submit</Text>
+                  )}
                 </TouchableOpacity>
               </ScrollView>
             )}
           </View>
-        </View>
+        </KeyboardAvoidingView>
       </Modal>
     </View>
   );
@@ -487,64 +727,26 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: COLORS.bgWhite,
   },
-  header: {
-    paddingHorizontal: SPACING.lg,
-    paddingTop: Platform.OS === 'ios' ? 12 : SPACING.sm,
-    paddingBottom: SPACING.md,
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    borderBottomWidth: 1,
-    borderBottomColor: COLORS.borderColor,
-    backgroundColor: COLORS.bgWhite,
-  },
-  headerLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-  },
-  backButton: {
-    width: 40,
-    height: 40,
-    borderRadius: RADIUS.md,
-    backgroundColor: COLORS.bgWhite,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 1,
-    borderColor: COLORS.borderColor,
-    shadowColor: COLORS.shadowColor,
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.06,
-    shadowRadius: 4,
-    elevation: 2,
-  },
-  headerTitle: {
-    fontSize: 22,
-    fontWeight: '800',
-    color: COLORS.primaryNavy,
-    letterSpacing: -0.4,
-  },
   syncIconButton: {
     width: 40,
     height: 40,
     borderRadius: RADIUS.md,
-    backgroundColor: COLORS.bgWhite,
+    backgroundColor: COLORS.inputBg,
     alignItems: 'center',
     justifyContent: 'center',
     borderWidth: 1,
     borderColor: COLORS.borderColor,
-    shadowColor: COLORS.shadowColor,
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.06,
-    shadowRadius: 4,
-    elevation: 2,
   },
   searchContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
     paddingHorizontal: SPACING.lg,
     paddingVertical: SPACING.sm,
     backgroundColor: COLORS.bgWhite,
+    gap: 8,
   },
   searchWrapper: {
+    flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: COLORS.inputBg,
@@ -768,38 +970,168 @@ const styles = StyleSheet.create({
   formGroup: {
     marginBottom: SPACING.md,
   },
-  formLabel: {
-    fontSize: 12,
+  fieldHeading: {
+    fontSize: 13,
     fontWeight: '700',
     color: COLORS.textDark,
-    marginBottom: 4,
+    marginBottom: 6,
   },
-  readOnlyCustomer: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: COLORS.primary,
-  },
-  quoteBoxModal: {
-    backgroundColor: COLORS.bgLinen,
-    padding: 10,
-    borderRadius: RADIUS.sm,
-    borderLeftWidth: 3,
-    borderLeftColor: COLORS.primary,
-  },
-  quoteBoxText: {
-    fontSize: 12,
-    fontStyle: 'italic',
-    color: COLORS.textDark,
-  },
-  formInput: {
+  taskInfoSection: {
+    backgroundColor: '#F8FAFC',
+    borderRadius: RADIUS.lg,
     borderWidth: 1,
-    borderColor: COLORS.borderColor,
+    borderColor: '#E2E8F0',
+    padding: 14,
+    marginBottom: SPACING.md,
+  },
+  taskInfoHeading: {
+    fontSize: 14,
+    fontWeight: '800',
+    color: COLORS.primaryNavy,
+    marginBottom: 10,
+    textTransform: 'capitalize',
+  },
+  infoDetailsBox: {
+    backgroundColor: COLORS.bgWhite,
+    borderRadius: RADIUS.md,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    gap: 8,
+  },
+  infoDetailRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    paddingBottom: 6,
+    borderBottomWidth: 1,
+    borderBottomColor: '#F1F5F9',
+  },
+  infoDetailLabel: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: COLORS.textMuted,
+    flex: 0.42,
+  },
+  infoDetailValue: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: COLORS.textDark,
+    flex: 0.58,
+    textAlign: 'right',
+  },
+  dateTimeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+    marginBottom: SPACING.md,
+  },
+  dateTimeCol: {
+    flex: 1,
+  },
+  dateTimeInputContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#F8FAFC',
+    borderWidth: 1,
+    borderColor: '#CBD5E1',
     borderRadius: RADIUS.md,
     paddingHorizontal: 12,
-    paddingVertical: 8,
+    height: 46,
+    gap: 8,
+  },
+  dateTimeInput: {
+    flex: 1,
+    fontSize: 13,
+    color: COLORS.textDark,
+    fontWeight: '600',
+    paddingVertical: 0,
+  },
+  notesTextarea: {
+    minHeight: 110,
+    maxHeight: 190,
+    backgroundColor: '#F8FAFC',
+    borderWidth: 1,
+    borderColor: '#CBD5E1',
+    borderRadius: RADIUS.md,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
     fontSize: 14,
     color: COLORS.textDark,
-    backgroundColor: COLORS.inputBg,
+    textAlignVertical: 'top',
+  },
+  dropdownTrigger: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: '#F8FAFC',
+    borderWidth: 1,
+    borderColor: '#CBD5E1',
+    borderRadius: RADIUS.md,
+    paddingHorizontal: 12,
+    height: 46,
+  },
+  dropdownTriggerActive: {
+    borderColor: COLORS.primary,
+    backgroundColor: '#EFF6FF',
+  },
+  dropdownTriggerLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    flex: 1,
+  },
+  dropdownTriggerText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: COLORS.textDark,
+    flex: 1,
+  },
+  dropdownMenu: {
+    backgroundColor: COLORS.bgWhite,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    borderRadius: RADIUS.md,
+    marginTop: 6,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+    elevation: 4,
+    overflow: 'hidden',
+  },
+  dropdownItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: '#F1F5F9',
+  },
+  dropdownItemActive: {
+    backgroundColor: '#EFF6FF',
+  },
+  dropdownItemContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    flex: 1,
+  },
+  dropdownItemName: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: COLORS.textDark,
+  },
+  dropdownItemNameActive: {
+    color: COLORS.primary,
+  },
+  dropdownItemRole: {
+    fontSize: 11,
+    color: COLORS.textMuted,
+    marginTop: 1,
   },
   modalSubmitBtn: {
     backgroundColor: COLORS.primary,
@@ -807,60 +1139,34 @@ const styles = StyleSheet.create({
     borderRadius: RADIUS.md,
     alignItems: 'center',
     justifyContent: 'center',
-    marginTop: SPACING.sm,
+    marginTop: SPACING.md,
+    shadowColor: COLORS.primary,
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.2,
+    shadowRadius: 5,
+    elevation: 3,
   },
   modalSubmitText: {
     color: COLORS.bgWhite,
-    fontSize: 15,
+    fontSize: 16,
     fontWeight: '700',
+    letterSpacing: 0.3,
   },
-  assignChipsContainer: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
-    marginTop: 4,
-  },
-  assignChip: {
-    flexDirection: 'row',
+  loadingContainer: {
+    flex: 1,
+    justifyContent: 'center',
     alignItems: 'center',
-    gap: 6,
-    paddingHorizontal: 12,
-    paddingVertical: 7,
-    borderRadius: RADIUS.full,
-    backgroundColor: COLORS.inputBg,
-    borderWidth: 1,
-    borderColor: COLORS.borderColor,
+    paddingVertical: 60,
   },
-  assignChipActive: {
-    backgroundColor: '#EFF6FF',
-    borderColor: COLORS.primary,
+  loadingText: {
+    marginTop: 12,
+    fontSize: 14,
+    color: COLORS.textMuted,
+    fontWeight: '500',
   },
-  assignChipText: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: COLORS.textDark,
-  },
-  assignChipTextActive: {
-    color: COLORS.primary,
-    fontWeight: '700',
-  },
-  chipAvatar: {
-    width: 20,
-    height: 20,
-    borderRadius: 10,
-    backgroundColor: COLORS.textMuted,
+  listFooterLoader: {
+    paddingVertical: 16,
     alignItems: 'center',
     justifyContent: 'center',
-  },
-  chipAvatarActive: {
-    backgroundColor: COLORS.primary,
-  },
-  chipAvatarText: {
-    color: COLORS.bgWhite,
-    fontSize: 10,
-    fontWeight: '700',
-  },
-  chipAvatarTextActive: {
-    color: COLORS.bgWhite,
   },
 });

@@ -9,12 +9,10 @@ import { CallsScreen } from '../screens/calls/CallsScreen';
 import { SettingsScreen } from '../screens/settings/SettingsScreen';
 import { COLORS } from '../constants/theme';
 import { Icon } from '../components/common/Icon';
-import { useTaskStore } from '../store/taskStore';
 
 const Tab = createBottomTabNavigator();
 
 export const BottomTabNavigator: React.FC = () => {
-  const pendingTasks = useTaskStore((s) => s.counts.pending);
   const insets = useSafeAreaInsets();
 
   // Calculate safe bottom padding for Android gesture navigation bar
@@ -23,7 +21,7 @@ export const BottomTabNavigator: React.FC = () => {
 
   return (
     <Tab.Navigator
-      initialRouteName="Link"
+      initialRouteName="Home"
       screenOptions={{
         headerShown: false,
         tabBarActiveTintColor: COLORS.primary,
@@ -43,8 +41,6 @@ export const BottomTabNavigator: React.FC = () => {
         component={HomeScreen}
         options={{
           tabBarLabel: 'Home',
-          tabBarBadge: pendingTasks > 0 ? pendingTasks : undefined,
-          tabBarBadgeStyle: styles.badge,
           tabBarIcon: ({ color, focused }) => (
             <Icon name="home" size={22} color={color} strokeWidth={focused ? 2.5 : 1.8} />
           ),

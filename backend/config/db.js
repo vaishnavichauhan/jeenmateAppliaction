@@ -69,9 +69,14 @@ async function initDb() {
         media_type ENUM('voice', 'video') DEFAULT 'voice',
         duration VARCHAR(30),
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        user_id INT NULL
+        user_id INT NULL,
+        account_phone VARCHAR(30) NULL
       );
     `);
+
+    try {
+      await connection.execute('ALTER TABLE whatsapp_calls ADD COLUMN account_phone VARCHAR(30) NULL');
+    } catch (e) {}
 
     // Verify admin user
     const [adminRows] = await connection.execute('SELECT id FROM users WHERE email = ?', ['admin@support.com']);

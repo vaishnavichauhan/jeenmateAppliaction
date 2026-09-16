@@ -26,16 +26,36 @@ function formatCallDuration(secondsStr?: string | number): string | undefined {
 }
 
 function formatCallDate(rawTime?: string | number): { dateStr: string; rawTimestamp: number } {
-  const ts = typeof rawTime === 'string' ? parseInt(rawTime, 10) : (typeof rawTime === 'number' ? rawTime : Date.now());
-  const validTs = isNaN(ts) ? Date.now() : ts;
+  let validTs = Date.now();
+  if (typeof rawTime === 'number' && !isNaN(rawTime)) {
+    validTs = rawTime > 1e11 ? rawTime : rawTime * 1000;
+  } else if (typeof rawTime === 'string') {
+    const str = rawTime.trim();
+    if (/^\d+$/.test(str)) {
+      const num = parseInt(str, 10);
+      validTs = str.length === 10 ? num * 1000 : num;
+    } else {
+      const parsed = new Date(str).getTime();
+      if (!isNaN(parsed) && parsed > 0) {
+        validTs = parsed;
+      }
+    }
+  }
+
   const callDate = new Date(validTs);
 
   const now = new Date();
-  const isToday = callDate.toDateString() === now.toDateString();
+  const isToday =
+    callDate.getDate() === now.getDate() &&
+    callDate.getMonth() === now.getMonth() &&
+    callDate.getFullYear() === now.getFullYear();
 
-  const yesterday = new Date();
+  const yesterday = new Date(now);
   yesterday.setDate(now.getDate() - 1);
-  const isYesterday = callDate.toDateString() === yesterday.toDateString();
+  const isYesterday =
+    callDate.getDate() === yesterday.getDate() &&
+    callDate.getMonth() === yesterday.getMonth() &&
+    callDate.getFullYear() === yesterday.getFullYear();
 
   const timeString = callDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
@@ -45,7 +65,8 @@ function formatCallDate(rawTime?: string | number): { dateStr: string; rawTimest
   } else if (isYesterday) {
     dateStr = `Yesterday, ${timeString}`;
   } else {
-    const month = callDate.toLocaleString('default', { month: 'short' });
+    const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const month = monthNames[callDate.getMonth()];
     const day = callDate.getDate();
     dateStr = `${day} ${month}, ${timeString}`;
   }
@@ -105,11 +126,11 @@ export async function fetchAndroidCallLogs(limit: number = 50): Promise<DeviceCa
 
       const phoneNumber = log.phoneNumber || log.number || 'Unknown';
       const name = log.name || log.cachedName || phoneNumber;
-      const { dateStr, rawTimestamp } = formatCallDate(log.timestamp || log.dateTime);
+      const { dateStr, rawTimestamp } = formatCallDate(log.timestamp || log.dateTime || log.date);
       const durationStr = formatCallDuration(log.duration);
 
       return {
-        id: `device_ph_${index}_${rawTimestamp}`,
+        id: log.id ? `device_ph_${log.id}` : `device_ph_${index}_${rawTimestamp}`,
         customerName: name,
         phoneNumber: phoneNumber,
         callType: callType,
