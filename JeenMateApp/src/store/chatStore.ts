@@ -3,14 +3,26 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import apiClient from '../services/api';
 import { getSocket } from '../services/socket';
 
+export interface CallMetadata {
+  isCall: boolean;
+  status: 'unknown' | 'answered' | 'missed' | 'rejected';
+  callType: 'incoming' | 'outgoing';
+  mediaType: 'voice' | 'video';
+  duration: number | null;
+  whatsappCallId?: string | null;
+}
+
 export interface ChatMessage {
   id: string;
   conversation_id: string;
   sender: 'staff' | '';
   text: string;
   timestamp: string;
-  status: 'sent' | 'delivered' | 'read';
+  whatsapp_timestamp?: number | null;
+  status: 'sent' | 'delivered' | 'read' | 'pending' | 'failed';
   whatsapp_message_id?: string | null;
+  message_type?: string;
+  metadata?: CallMetadata | null;
 }
 
 export interface Conversation {
@@ -51,71 +63,64 @@ interface ChatState {
 
 const STORAGE_KEY_CONVS = '@jeenmate_conversations_cache_v2';
 
-const parseTime = (t?: string) => {
+export const parseTime = (t?: string | number): number => {
   if (!t) return 0;
-  const str = !t.includes('T') && !t.endsWith('Z') ? `${t.replace(' ', 'T')}Z` : t;
-  const d = new Date(str);
-  return isNaN(d.getTime()) ? 0 : d.getTime();
+  if (typeof t === 'number') return t > 1e11 ? t : t * 1000;
+  const str = String(t).trim();
+  if (/^\d{10,13}$/.test(str)) {
+    const num = Number(str);
+    return num > 1e11 ? num : num * 1000;
+  }
+  const normalized = str.includes('T') || str.endsWith('Z')
+    ? (str.endsWith('Z') ? str : `${str}Z`)
+    : `${str.replace(' ', 'T')}Z`;
+  const d = new Date(normalized);
+  if (!isNaN(d.getTime())) return d.getTime();
+  const dRaw = new Date(str);
+  return isNaN(dRaw.getTime()) ? 0 : dRaw.getTime();
+};
+
+export const getMessageTime = (m: ChatMessage): number => {
+  if (m.whatsapp_timestamp && Number(m.whatsapp_timestamp) > 0) {
+    return Number(m.whatsapp_timestamp);
+  }
+  return parseTime(m.timestamp);
+};
+
+export const sortMessages = (msgs: ChatMessage[]): ChatMessage[] => {
+  return [...msgs].sort((a, b) => {
+    const timeA = getMessageTime(a);
+    const timeB = getMessageTime(b);
+    if (timeA !== timeB) return timeA - timeB;
+    const idA = typeof a.id === 'number' ? a.id : parseInt(String(a.id), 10) || 0;
+    const idB = typeof b.id === 'number' ? b.id : parseInt(String(b.id), 10) || 0;
+    return idA - idB;
+  });
 };
 
 export const deduplicateConversations = (convs: Conversation[]): Conversation[] => {
-  // Step 1: Deduplicate by conversation ID
-  const byId = new Map<string, Conversation>();
+  const byPhoneOrId = new Map<string, Conversation>();
+
   convs.forEach((c) => {
-    const existing = byId.get(c.id);
+    const rawPhone = (c.phone_number || '').replace(/[^0-9]/g, '');
+    const isGroup = (c.phone_number || '').startsWith('group-');
+    const key = isGroup
+      ? c.phone_number
+      : (rawPhone.length >= 10 ? rawPhone.slice(-10) : (c.id || rawPhone));
+
+    const existing = byPhoneOrId.get(key);
     if (!existing) {
-      byId.set(c.id, c);
+      byPhoneOrId.set(key, c);
     } else {
       const existingTime = parseTime(existing.last_message_at);
       const currentTime = parseTime(c.last_message_at);
-      if (currentTime > existingTime) {
-        byId.set(c.id, c);
+      if (currentTime >= existingTime) {
+        byPhoneOrId.set(key, c);
       }
     }
   });
 
-  // Step 2: Deduplicate by phone_number (same contact may have multiple conversation records)
-  const byPhone = new Map<string, Conversation>();
-  Array.from(byId.values()).forEach((c) => {
-    const phone = (c.phone_number || '').replace(/[^0-9]/g, '');
-    if (!phone) {
-      byPhone.set(`__nophone_${c.id}`, c);
-      return;
-    }
-    const existing = byPhone.get(phone);
-    if (!existing) {
-      byPhone.set(phone, c);
-    } else {
-      const existingTime = parseTime(existing.last_message_at);
-      const currentTime = parseTime(c.last_message_at);
-      if (currentTime > existingTime) {
-        byPhone.set(phone, c);
-      }
-    }
-  });
-
-  // Step 3: Deduplicate by customer_name (same person may have different phone numbers, e.g. LID vs real)
-  const byName = new Map<string, Conversation>();
-  Array.from(byPhone.values()).forEach((c) => {
-    const name = (c.customer_name || '').trim().toLowerCase();
-    if (!name || name === 'customer' || name === 'contact') {
-      // Generic names — don't merge, keep as-is
-      byName.set(`__generic_${c.id}`, c);
-      return;
-    }
-    const existing = byName.get(name);
-    if (!existing) {
-      byName.set(name, c);
-    } else {
-      const existingTime = parseTime(existing.last_message_at);
-      const currentTime = parseTime(c.last_message_at);
-      if (currentTime > existingTime) {
-        byName.set(name, c);
-      }
-    }
-  });
-
-  return Array.from(byName.values());
+  return Array.from(byPhoneOrId.values());
 };
 
 export const sortConversations = (convs: Conversation[]): Conversation[] => {
@@ -181,22 +186,22 @@ export const useChatStore = create<ChatState>((set, get) => ({
       if (res.data && res.data.success) {
         const rawMsgs: ChatMessage[] = res.data.data || [];
 
-        // Deduplicate messages by ID only
+        // Deduplicate messages by ID and whatsapp_message_id
         const seenIds = new Set<string>();
+        const seenWaIds = new Set<string>();
         const uniqueMsgs: ChatMessage[] = [];
 
         for (const m of rawMsgs) {
           if (!m.id) continue;
-          if (seenIds.has(m.id)) continue;
-          seenIds.add(m.id);
+          if (seenIds.has(String(m.id))) continue;
+          if (m.whatsapp_message_id && seenWaIds.has(m.whatsapp_message_id)) continue;
+
+          seenIds.add(String(m.id));
+          if (m.whatsapp_message_id) seenWaIds.add(m.whatsapp_message_id);
           uniqueMsgs.push(m);
         }
 
-        const sortedMsgs = uniqueMsgs.sort((a, b) => {
-          const timeA = parseTime(a.timestamp);
-          const timeB = parseTime(b.timestamp);
-          return timeA - timeB;
-        });
+        const sortedMsgs = sortMessages(uniqueMsgs);
 
         set({
           messages: sortedMsgs,
@@ -232,7 +237,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
       // Find the oldest message timestamp currently displayed
       const oldestMsg = currentMessages[0];
-      const beforeTimestamp = oldestMsg?.timestamp;
+      const beforeTimestamp = oldestMsg?.whatsapp_timestamp || oldestMsg?.timestamp;
 
       const res = await apiClient.get(`/api/conversations/${conversationId}/messages`, {
         params: {
@@ -243,8 +248,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
       if (res.data && res.data.success) {
         const rawOlderMsgs: ChatMessage[] = res.data.data || [];
-        // Deduplicate against existing messages by ID only
-        const existingIds = new Set(currentMessages.map((m) => m.id));
+        const existingIds = new Set(currentMessages.map((m) => String(m.id)));
+        const existingWaIds = new Set(
+          currentMessages.filter((m) => m.whatsapp_message_id).map((m) => m.whatsapp_message_id!)
+        );
 
         if (rawOlderMsgs.length === 0) {
           set({ hasMoreMessages: false, isLoadingOlder: false });
@@ -253,7 +260,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
         const newOlder = rawOlderMsgs.filter((m) => {
           if (!m.id) return false;
-          return !existingIds.has(m.id);
+          if (existingIds.has(String(m.id))) return false;
+          if (m.whatsapp_message_id && existingWaIds.has(m.whatsapp_message_id)) return false;
+          return true;
         });
 
         if (newOlder.length === 0) {
@@ -261,11 +270,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           return 0;
         }
 
-        const sortedCombined = [...newOlder, ...currentMessages].sort((a, b) => {
-          const timeA = parseTime(a.timestamp);
-          const timeB = parseTime(b.timestamp);
-          return timeA - timeB;
-        });
+        const sortedCombined = sortMessages([...newOlder, ...currentMessages]);
 
         set({
           messages: sortedCombined,
@@ -296,12 +301,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
       sender: 'staff',
       text: text.trim(),
       timestamp,
+      whatsapp_timestamp: Date.now(),
       status: 'sent',
     };
 
     // Optimistic UI update — add message & push conversation to top of list
     set((state) => {
-      const updatedMessages = [...state.messages, optimisticMessage];
+      const updatedMessages = sortMessages([...state.messages, optimisticMessage]);
       const updatedConvs = state.conversations.map((c) =>
         c.id === conversationId ? { ...c, last_message: text.trim(), last_message_at: timestamp } : c
       );
@@ -319,7 +325,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       if (res.data && res.data.success) {
         const saved = res.data.data;
         set((state) => ({
-          messages: state.messages.map((m) => (m.id === localMsgId ? saved : m)),
+          messages: sortMessages(state.messages.map((m) => (m.id === localMsgId ? saved : m))),
         }));
       }
       return true;
@@ -359,42 +365,49 @@ export const useChatStore = create<ChatState>((set, get) => ({
     socket.on('new_message', (payload: { conversationId: string; message: ChatMessage }) => {
       const { activeConversation, conversations } = get();
 
-      // Skip outgoing (staff-sent) messages — already shown optimistically via sendMessage().
-      if (payload.message.sender === 'staff') return;
-
-      if (activeConversation && activeConversation.id === payload.conversationId) {
+      if (activeConversation && String(activeConversation.id) === String(payload.conversationId)) {
         set((state) => {
-          const exists = state.messages.some(
+          // Check if message already exists by ID or whatsapp_message_id
+          const existingIdx = state.messages.findIndex(
             (m) =>
-              m.id === payload.message.id ||
-              (m.sender === payload.message.sender &&
-                m.text === payload.message.text &&
-                Math.abs(parseTime(m.timestamp) - parseTime(payload.message.timestamp)) < 5000)
+              (payload.message.id && String(m.id) === String(payload.message.id)) ||
+              (payload.message.whatsapp_message_id &&
+                m.whatsapp_message_id &&
+                m.whatsapp_message_id === payload.message.whatsapp_message_id) ||
+              (payload.message.sender === 'staff' &&
+                String(m.id).startsWith('msg_staff_') &&
+                m.text === payload.message.text)
           );
-          if (exists) return state;
-          const updated = [...state.messages, payload.message].sort((a, b) => {
-            return parseTime(a.timestamp) - parseTime(b.timestamp);
-          });
-          return { messages: updated };
+
+          let updated: ChatMessage[];
+          if (existingIdx >= 0) {
+            // Replace existing or optimistic version
+            updated = [...state.messages];
+            updated[existingIdx] = payload.message;
+          } else {
+            updated = [...state.messages, payload.message];
+          }
+
+          return { messages: sortMessages(updated) };
         });
       }
 
-      const existsInList = conversations.some((c) => c.id === payload.conversationId);
+      const existsInList = conversations.some((c) => String(c.id) === String(payload.conversationId));
       if (!existsInList) {
         get().fetchConversations();
         return;
       }
 
-      // Update conversation list preview & increment unread if not open
+      // Update conversation list preview & increment unread if not currently viewing
       set((state) => {
         const updatedConvs = state.conversations.map((c) => {
-          if (c.id === payload.conversationId) {
-            const isCurrentChat = activeConversation?.id === payload.conversationId;
+          if (String(c.id) === String(payload.conversationId)) {
+            const isCurrentChat = activeConversation && String(activeConversation.id) === String(payload.conversationId);
             return {
               ...c,
               last_message: payload.message.text,
-              last_message_at: payload.message.timestamp,
-              unread_count: isCurrentChat ? 0 : c.unread_count + 1,
+              last_message_at: payload.message.timestamp || new Date().toISOString(),
+              unread_count: isCurrentChat ? 0 : (c.unread_count || 0) + (payload.message.sender === 'staff' ? 0 : 1),
             };
           }
           return c;
@@ -405,10 +418,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     socket.on('conversation_updated', (updatedConv: Conversation) => {
       set((state) => {
-        const exists = state.conversations.some((c) => c.id === updatedConv.id);
+        const exists = state.conversations.some((c) => String(c.id) === String(updatedConv.id));
         let updatedList: Conversation[];
         if (exists) {
-          updatedList = state.conversations.map((c) => (c.id === updatedConv.id ? updatedConv : c));
+          updatedList = state.conversations.map((c) => (String(c.id) === String(updatedConv.id) ? updatedConv : c));
         } else {
           updatedList = [updatedConv, ...state.conversations];
         }

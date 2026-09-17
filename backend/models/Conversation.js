@@ -8,7 +8,27 @@ const Conversation = {
         c.customer_id,
         c.status,
         c.unread_count,
-        DATE_FORMAT(c.last_message_at, '%Y-%m-%dT%H:%i:%s.000Z') as last_message_at,
+        COALESCE(
+          (
+            SELECT DATE_FORMAT(CONVERT_TZ(FROM_UNIXTIME(COALESCE(m.whatsapp_timestamp, UNIX_TIMESTAMP(m.created_at) * 1000) / 1000), @@session.time_zone, '+00:00'), '%Y-%m-%dT%H:%i:%s.000Z')
+            FROM messages m 
+            WHERE (m.conversation_id = c.id OR (c.customer_id IS NOT NULL AND m.customer_id = c.customer_id))
+            ORDER BY COALESCE(m.whatsapp_timestamp, UNIX_TIMESTAMP(m.created_at) * 1000) DESC, m.id DESC
+            LIMIT 1
+          ),
+          DATE_FORMAT(CONVERT_TZ(c.last_message_at, @@session.time_zone, '+00:00'), '%Y-%m-%dT%H:%i:%s.000Z'),
+          DATE_FORMAT(CONVERT_TZ(c.created_at, @@session.time_zone, '+00:00'), '%Y-%m-%dT%H:%i:%s.000Z')
+        ) as last_message_at,
+        COALESCE(
+          (
+            SELECT COALESCE(m.whatsapp_timestamp, UNIX_TIMESTAMP(m.created_at) * 1000)
+            FROM messages m 
+            WHERE (m.conversation_id = c.id OR (c.customer_id IS NOT NULL AND m.customer_id = c.customer_id))
+            ORDER BY COALESCE(m.whatsapp_timestamp, UNIX_TIMESTAMP(m.created_at) * 1000) DESC, m.id DESC
+            LIMIT 1
+          ),
+          UNIX_TIMESTAMP(COALESCE(c.last_message_at, c.created_at)) * 1000
+        ) as effective_last_time,
         c.is_pinned,
         COALESCE(NULLIF(cu.name, ''), cu.phone_number, 'Customer') as customer_name,
         COALESCE(cu.phone_number, '') as phone_number,
@@ -17,22 +37,24 @@ const Conversation = {
           SELECT 
             CASE 
               WHEN m.message = '[revoked]' THEN '🚫 You deleted this message' 
-              ELSE m.message 
+              WHEN m.message_type = 'image' OR m.message IN ('Image', 'Images') THEN '📷 Photo'
+              WHEN m.message_type = 'video' OR m.message = 'Video' THEN '🎥 Video'
+              WHEN m.message_type = 'audio' OR m.message_type = 'voice' OR m.message = 'Voice message' THEN '🎤 Voice message'
+              WHEN m.message_type = 'document' OR m.message = 'Document' THEN '📄 Document'
+              WHEN m.message_type = 'call' OR m.message IN ('Call', 'Voice call', 'Video call', '[call_log]') THEN '📞 Call'
+              WHEN m.message_type = 'location' OR m.message = 'Location' THEN '📍 Location'
+              WHEN m.message_type = 'sticker' OR m.message = 'Sticker' THEN '🏷️ Sticker'
+              WHEN m.message IS NOT NULL AND TRIM(m.message) != '' THEN m.message
+              ELSE NULL
             END 
           FROM messages m 
-          WHERE m.conversation_id = c.id 
-            AND m.message IS NOT NULL 
-            AND m.message != '' 
-          ORDER BY m.created_at DESC, m.id DESC 
+          WHERE (m.conversation_id = c.id OR (c.customer_id IS NOT NULL AND m.customer_id = c.customer_id))
+          ORDER BY COALESCE(m.whatsapp_timestamp, UNIX_TIMESTAMP(m.created_at) * 1000) DESC, m.id DESC 
           LIMIT 1
         ) as last_message
       FROM conversations c
       LEFT JOIN customers cu ON c.customer_id = cu.id
       WHERE 1=1
-        AND (
-          EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id)
-          OR c.unread_count > 0
-        )
     `;
     const params = [];
 
@@ -47,7 +69,7 @@ const Conversation = {
       params.push(term, term);
     }
 
-    query += ` ORDER BY c.is_pinned DESC, c.last_message_at DESC`;
+    query += ` ORDER BY c.is_pinned DESC, effective_last_time DESC, c.id DESC`;
     const [rows] = await pool.execute(query, params);
 
     // Deduplicate by clean customer phone number to ensure 1 conversation per contact
@@ -59,7 +81,7 @@ const Conversation = {
       const isGroup = String(row.phone_number || '').startsWith('group-');
       const phoneKey = isGroup
         ? row.phone_number
-        : (rawPhone.length >= 10 ? rawPhone.slice(-10) : (rawPhone || `id_${row.customer_id}`));
+        : (rawPhone.length >= 10 ? rawPhone.slice(-10) : (rawPhone ? `phone_${rawPhone}` : `conv_${row.id}`));
 
       if (!seenPhones.has(phoneKey)) {
         seenPhones.add(phoneKey);
@@ -77,7 +99,18 @@ const Conversation = {
         c.customer_id,
         c.status,
         c.unread_count,
-        DATE_FORMAT(c.last_message_at, '%Y-%m-%dT%H:%i:%s.000Z') as last_message_at,
+        COALESCE(
+          (
+            SELECT DATE_FORMAT(CONVERT_TZ(FROM_UNIXTIME(COALESCE(m.whatsapp_timestamp, UNIX_TIMESTAMP(m.created_at) * 1000) / 1000), @@session.time_zone, '+00:00'), '%Y-%m-%dT%H:%i:%s.000Z')
+            FROM messages m 
+            WHERE (m.conversation_id = c.id OR (c.customer_id IS NOT NULL AND m.customer_id = c.customer_id))
+            ORDER BY COALESCE(m.whatsapp_timestamp, UNIX_TIMESTAMP(m.created_at) * 1000) DESC, m.id DESC
+            LIMIT 1
+          ),
+          DATE_FORMAT(CONVERT_TZ(c.last_message_at, @@session.time_zone, '+00:00'), '%Y-%m-%dT%H:%i:%s.000Z'),
+          DATE_FORMAT(CONVERT_TZ(c.created_at, @@session.time_zone, '+00:00'), '%Y-%m-%dT%H:%i:%s.000Z')
+        ) as last_message_at,
+        c.is_pinned,
         COALESCE(NULLIF(cu.name, ''), cu.phone_number, 'Customer') as customer_name,
         COALESCE(cu.phone_number, '') as phone_number,
         cu.profile_pic_url as avatar,
@@ -85,13 +118,19 @@ const Conversation = {
           SELECT 
             CASE 
               WHEN m.message = '[revoked]' THEN '🚫 You deleted this message' 
-              ELSE m.message 
+              WHEN m.message_type = 'image' OR m.message IN ('Image', 'Images') THEN '📷 Photo'
+              WHEN m.message_type = 'video' OR m.message = 'Video' THEN '🎥 Video'
+              WHEN m.message_type = 'audio' OR m.message_type = 'voice' OR m.message = 'Voice message' THEN '🎤 Voice message'
+              WHEN m.message_type = 'document' OR m.message = 'Document' THEN '📄 Document'
+              WHEN m.message_type = 'call' OR m.message IN ('Call', 'Voice call', 'Video call', '[call_log]') THEN '📞 Call'
+              WHEN m.message_type = 'location' OR m.message = 'Location' THEN '📍 Location'
+              WHEN m.message_type = 'sticker' OR m.message = 'Sticker' THEN '🏷️ Sticker'
+              WHEN m.message IS NOT NULL AND TRIM(m.message) != '' THEN m.message
+              ELSE NULL
             END 
           FROM messages m 
-          WHERE m.conversation_id = c.id 
-            AND m.message IS NOT NULL 
-            AND m.message != '' 
-          ORDER BY m.created_at DESC, m.id DESC 
+          WHERE (m.conversation_id = c.id OR (c.customer_id IS NOT NULL AND m.customer_id = c.customer_id))
+          ORDER BY COALESCE(m.whatsapp_timestamp, UNIX_TIMESTAMP(m.created_at) * 1000) DESC, m.id DESC 
           LIMIT 1
         ) as last_message
       FROM conversations c

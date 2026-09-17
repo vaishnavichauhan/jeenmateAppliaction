@@ -5,11 +5,13 @@ const authRoutes = require('./authRoutes');
 const conversationRoutes = require('./conversationRoutes');
 const taskRoutes = require('./taskRoutes');
 const whatsappRoutes = require('./whatsappRoutes');
+const internalChatRoutes = require('./internalChatRoutes');
 
 router.use('/auth', authRoutes);
 router.use('/conversations', conversationRoutes);
 router.use('/tasks', taskRoutes);
 router.use('/whatsapp', whatsappRoutes);
+router.use('/internal-chat', internalChatRoutes);
 
 // Health check endpoint
 router.get('/health', (req, res) => {

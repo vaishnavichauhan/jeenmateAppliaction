@@ -21,7 +21,7 @@ import { useNavigation, useFocusEffect } from '@react-navigation/native';
 import { COLORS, SPACING, RADIUS } from '../../constants/theme';
 import { Icon } from '../../components/common/Icon';
 import { Header } from '../../components/common/Header';
-import { useTaskStore, TeamMember } from '../../store/taskStore';
+import { useTaskStore, TeamMember, TaskEventType } from '../../store/taskStore';
 import { useAuthStore } from '../../store/authStore';
 import { useWhatsAppStore } from '../../store/whatsappStore';
 import apiClient from '../../services/api';
@@ -34,9 +34,10 @@ export interface CallLogItem {
   customerName: string;
   phoneNumber: string;
   callType: 'incoming' | 'outgoing' | 'missed';
+  status?: 'unknown' | 'answered' | 'missed' | 'rejected';
   mediaType: 'voice' | 'video';
   timestamp: string;
-  duration?: string;
+  duration?: number | string | null;
   avatar?: string;
   isVideo?: boolean;
   isVideoCall?: boolean;
@@ -224,6 +225,16 @@ const getDateCategory = (d: Date): string => {
   return `${day} ${month} ${year}`;
 };
 
+const formatCallDuration = (dur?: number | string | null): string => {
+  if (dur === null || dur === undefined || dur === '' || dur === '0s' || dur === '0') return '';
+  const num = typeof dur === 'number' ? dur : parseInt(String(dur).replace(/[^0-9]/g, ''), 10);
+  if (isNaN(num) || num <= 0) return '';
+  if (num < 60) return `${num}s`;
+  const m = Math.floor(num / 60);
+  const s = num % 60;
+  return `${m}:${s.toString().padStart(2, '0')}`;
+};
+
 /**
  * Formats dynamic call event description (e.g., "missed call at 13:sept, 6:42 pm (duration 29s)").
  */
@@ -246,8 +257,9 @@ const getEventDescription = (call: CallLogItem): string => {
     : 'outgoing call';
 
   const atPart = dateStr ? `at ${dateStr}, ${timeStr}` : (timeStr ? `at ${timeStr}` : '');
-  const durationStr = call.callType !== 'missed' && call.duration && call.duration.trim() && call.duration.trim() !== '0s' && call.duration.trim() !== '0'
-    ? ` (duration ${call.duration})`
+  const formattedDur = formatCallDuration(call.duration);
+  const durationStr = call.callType !== 'missed' && formattedDur
+    ? ` (duration ${formattedDur})`
     : '';
 
   return `${callTypeStr} ${atPart}${durationStr}`.trim();
@@ -439,9 +451,10 @@ export const CallsScreen: React.FC = () => {
             customerName: item.customerName || item.phoneNumber || 'Customer',
             phoneNumber: item.phoneNumber || '',
             callType: (item.callType || 'incoming').toLowerCase() as 'incoming' | 'outgoing' | 'missed',
+            status: item.status || (item.callType === 'missed' ? 'missed' : 'unknown'),
             mediaType: mediaType,
             timestamp: item.timestamp,
-            duration: item.duration || undefined,
+            duration: item.duration !== null && item.duration !== undefined ? item.duration : undefined,
             isVideo: isVideo,
             isVideoCall: isVideo,
             rawCall: rawCall,
@@ -536,6 +549,7 @@ export const CallsScreen: React.FC = () => {
       setIsSubmittingTask(true);
       const combinedDue = taskTime?.trim() ? `${dueDate.trim()} ${taskTime.trim()}` : dueDate.trim();
 
+      const eventType: TaskEventType = activeTab === 'whatsapp' ? 'WhatsappCall' : 'PhoneCall';
       await addTask({
         customerId: selectedCall.id,
         customerName: selectedCall.customerName,
@@ -544,11 +558,12 @@ export const CallsScreen: React.FC = () => {
         staffNote: staffNote,
         dueDate: combinedDue,
         assignedToUserId: assignedUser ? assignedUser.id : null,
+        eventType,
       });
       setAssignedUser(null);
       setAssignDropdownOpen(false);
       setTaskModalVisible(false);
-      Alert.alert('Task Created', `CRM Task scheduled for ${selectedCall.customerName}.`);
+      Alert.alert('Task Created Successfully')
     } catch (e: any) {
       Alert.alert('Error', e?.message || 'Failed to create task');
     } finally {
@@ -677,10 +692,10 @@ export const CallsScreen: React.FC = () => {
               </View>
               <View style={styles.phoneMetaRow}>
                 <Text style={styles.itemPhoneText}>{item.phoneNumber}</Text>
-                {!isMissed && item.duration && item.duration.trim() !== '' && item.duration.trim() !== '0s' && item.duration.trim() !== '0' ? (
+                {!isMissed && formatCallDuration(item.duration) ? (
                   <View style={styles.durationBadge}>
                     <Icon name="clock" size={10} color={COLORS.textMuted} />
-                    <Text style={styles.durationText}>{item.duration}</Text>
+                    <Text style={styles.durationText}>{formatCallDuration(item.duration)}</Text>
                   </View>
                 ) : null}
               </View>
@@ -725,9 +740,7 @@ export const CallsScreen: React.FC = () => {
                   ? (item.mediaType === 'video' ? '↙ Missed video call' : '↙ Missed voice call')
                   : isIncoming
                   ? (item.mediaType === 'video' ? '↓ Incoming video call' : '↓ Incoming voice call')
-                  : (!item.duration || item.duration.trim() === '' || item.duration.trim() === '0s' || item.duration.trim() === '0'
-                      ? (item.mediaType === 'video' ? '↑ Outgoing unanswered video call' : '↑ Outgoing unanswered voice call')
-                      : (item.mediaType === 'video' ? '↑ Outgoing video call' : '↑ Outgoing voice call'))}
+                  : (item.mediaType === 'video' ? '↑ Outgoing video call' : '↑ Outgoing voice call')}
               </Text>
             </View>
           </View>
@@ -1011,7 +1024,7 @@ export const CallsScreen: React.FC = () => {
                     <View style={styles.infoDetailRow}>
                       <Text style={styles.infoDetailLabel}>Event Type :</Text>
                       <Text style={styles.infoDetailValue}>
-                        {activeTab === 'whatsapp' ? 'WhatsApp Call' : (selectedCall.mediaType === 'video' ? 'Video Call' : 'Phone Call')}
+                        {activeTab === 'whatsapp' ? 'WhatsappCall':'PhoneCall'}
                       </Text>
                     </View>
 

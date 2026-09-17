@@ -13,21 +13,7 @@ async function getUserSession(req) {
 // GET /api/whatsapp/status
 async function getStatus(req, res, next) {
   try {
-    const userId = req.user.id;
-    const service = sessionManager.getSession(userId);
-    if (!service) {
-      return res.status(200).json({
-        success: true,
-        data: {
-          isConnected: false,
-          status: 'offline',
-          phone: null,
-          name: null,
-          hasQr: false,
-          lastUpdated: new Date().toISOString()
-        }
-      });
-    }
+    const service = await getUserSession(req);
     return res.status(200).json({
       success: true,
       data: service.getStatus()
@@ -425,13 +411,21 @@ async function syncChatMessages(req, res) {
       const dir = m.fromMe ? 'outgoing' : 'incoming';
       const safeMsgId = m.id ? String(m.id).slice(0, 191) : `wa_${m.timestamp}_${dir}`;
       if (safeMsgId) {
-        const [exist] = await pool.execute('SELECT id FROM messages WHERE whatsapp_message_id = ? AND user_id = ? LIMIT 1', [safeMsgId, userId]);
+        const [exist] = await pool.execute('SELECT id, message_type FROM messages WHERE whatsapp_message_id = ? AND user_id = ? LIMIT 1', [safeMsgId, userId]);
         if (exist.length === 0) {
+          const metadataJson = m.metadata ? JSON.stringify(m.metadata) : null;
           await pool.execute(
-            `INSERT INTO messages (conversation_id, customer_id, direction, message, whatsapp_message_id, message_type, status, created_at, user_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            [convId, conversation.customer_id, dir, m.body || '', safeMsgId, m.type || 'text', m.status || 'delivered', iso, userId]
+            `INSERT INTO messages (conversation_id, customer_id, direction, message, whatsapp_message_id, message_type, whatsapp_timestamp, status, created_at, user_id, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [convId, conversation.customer_id, dir, m.body || '', safeMsgId, m.type || 'text', m.timestamp * 1000, m.status || 'delivered', iso, userId, metadataJson]
           );
           inserted++;
+        } else if (m.type === 'call' && m.metadata) {
+          // Historical sync finds the same call and updates the existing record
+          const metadataJson = JSON.stringify(m.metadata);
+          await pool.execute(
+            'UPDATE messages SET metadata = ?, message = ?, message_type = ? WHERE id = ?',
+            [metadataJson, m.body || '', m.type, exist[0].id]
+          );
         }
       }
     }
@@ -457,14 +451,27 @@ async function logCall(req, res) {
       const rawNumber = String(phoneNumber).replace(/[^0-9]/g, '');
       const formattedPhone = rawNumber.startsWith('+') ? rawNumber : `+${rawNumber}`;
       const mediaLabel = mediaType === 'video' ? 'video' : 'voice';
+      const callStatus = callType === 'missed' ? 'missed' : 'unknown';
       const callMsgText = mediaLabel === 'video'
         ? (callType === 'missed' ? '📹 Missed video call' : (callType === 'outgoing' ? '📹 Outgoing video call' : '📹 Video call'))
         : (callType === 'missed' ? '📞 Missed voice call' : (callType === 'outgoing' ? '📞 Outgoing voice call' : '📞 Voice call'));
 
+      const safeCallId = `call_manual_${Date.now()}`;
+      const rawCallJson = JSON.stringify({
+        id: safeCallId,
+        from: formattedPhone,
+        timestamp: Math.floor(Date.now() / 1000),
+        isGroup: false,
+        isVideo: mediaLabel === 'video',
+        isVideoCall: mediaLabel === 'video',
+        fromMe: callType === 'outgoing',
+        status: callStatus
+      });
+
       await pool.execute(
-        `INSERT INTO whatsapp_calls (call_id, phone_number, customer_name, call_type, media_type, created_at, user_id)
-         VALUES (?, ?, ?, ?, ?, NOW(), ?)`,
-        [`call_manual_${Date.now()}`, formattedPhone, 'Customer', callType, mediaLabel, userId]
+        `INSERT INTO whatsapp_calls (call_id, phone_number, customer_name, call_type, media_type, duration, raw_call, created_at, user_id)
+         VALUES (?, ?, ?, ?, ?, NULL, ?, NOW(), ?)`,
+        [safeCallId, formattedPhone, 'Customer', callType === 'missed' ? 'missed' : (callType === 'incoming' ? 'incoming' : 'outgoing'), mediaLabel, rawCallJson, userId]
       );
 
       if (conversationId) {
@@ -474,11 +481,21 @@ async function logCall(req, res) {
         );
         if (convRows.length > 0) {
           const customerId = convRows[0].customer_id;
-          const utcStr = new Date().toISOString().slice(0, 19).replace('T', ' ');
+          const nowMs = Date.now();
+          const utcStr = new Date(nowMs).toISOString().slice(0, 19).replace('T', ' ');
+          const metadataJson = JSON.stringify({
+            isCall: true,
+            status: callStatus,
+            callType: callType === 'incoming' ? 'incoming' : 'outgoing',
+            mediaType: mediaLabel,
+            duration: null,
+            whatsappCallId: safeCallId
+          });
+
           await pool.execute(
-            `INSERT INTO messages (conversation_id, customer_id, direction, message, whatsapp_message_id, message_type, status, created_at, user_id)
-             VALUES (?, ?, 'outgoing', ?, ?, 'text', 'delivered', ?, ?)`,
-            [conversationId, customerId, callMsgText, `call_${Date.now()}`, utcStr, userId]
+            `INSERT INTO messages (conversation_id, customer_id, direction, message, whatsapp_message_id, message_type, whatsapp_timestamp, status, created_at, user_id, metadata)
+             VALUES (?, ?, ?, ?, ?, 'call', ?, 'delivered', ?, ?, ?)`,
+            [conversationId, customerId, callType === 'incoming' ? 'incoming' : 'outgoing', callMsgText, safeCallId, nowMs, utcStr, userId, metadataJson]
           );
           await pool.execute(
             'UPDATE conversations SET last_message_at = ? WHERE id = ?',

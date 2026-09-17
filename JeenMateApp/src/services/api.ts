@@ -2,10 +2,7 @@ import axios from 'axios';
 import { useAuthStore } from '../store/authStore';
 
 const apiClient = axios.create({
-  timeout: 10000,
-  headers: {
-    'Content-Type': 'application/json',
-  },
+  timeout: 15000,
 });
 
 apiClient.interceptors.request.use(
@@ -14,6 +11,18 @@ apiClient.interceptors.request.use(
     config.baseURL = serverUrl;
     if (token) {
       config.headers.Authorization = `Bearer ${token}`;
+    }
+    // If sending FormData (file uploads), remove Content-Type so Axios/XHR generates multipart boundary
+    if (config.data instanceof FormData || (config.data && typeof config.data.append === 'function')) {
+      if (config.headers) {
+        if (typeof config.headers.delete === 'function') {
+          config.headers.delete('Content-Type');
+          config.headers.delete('content-type');
+        } else {
+          delete config.headers['Content-Type'];
+          delete config.headers['content-type'];
+        }
+      }
     }
     return config;
   },

@@ -43,7 +43,15 @@ interface IconProps {
     | 'bell'
     | 'moon'
     | 'theme'
-    | 'qr-code';
+    | 'qr-code'
+    | 'whatsapp'
+    | 'paperclip'
+    | 'paperClip'
+    | 'attachment'
+    | 'image'
+    | 'camera'
+    | 'x'
+    | 'close';
   size?: number;
   color?: string;
   strokeWidth?: number;
@@ -367,6 +375,55 @@ export const Icon: React.FC<IconProps> = ({
           <Rect x="14" y="3" width="7" height="7" rx="1" />
           <Rect x="14" y="14" width="7" height="7" rx="1" />
           <Rect x="3" y="14" width="7" height="7" rx="1" />
+        </Svg>
+      );
+
+    case 'whatsapp':
+      return (
+        <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+          <Path
+            d="M17.5 14.33c-.24-.12-1.42-.7-1.64-.78-.22-.08-.38-.12-.54.12s-.62.78-.76.94c-.14.16-.28.18-.52.06-.24-.12-1.01-.37-1.92-1.18-.71-.63-1.19-1.41-1.33-1.65-.14-.24-.01-.37.11-.49.11-.11.24-.28.36-.42.12-.14.16-.24.24-.4.08-.16.04-.3-.02-.42-.06-.12-.54-1.3-.74-1.78-.2-.48-.4-.41-.55-.42-.14-.01-.3-.01-.46-.01s-.42.06-.64.3c-.22.24-.84.82-.84 2s.86 2.32.98 2.48c.12.16 1.7 2.6 4.12 3.64.58.25 1.03.4 1.38.51.58.18 1.11.16 1.53.1.47-.07 1.42-.58 1.62-1.14.2-.56.2-1.04.14-1.14-.06-.1-.22-.16-.46-.28z"
+            fill={color}
+          />
+          <Path
+            d="M12 2a9.96 9.96 0 0 0-8.58 15.08L2 22l5.05-1.33A9.97 9.97 0 0 0 12 22c5.52 0 10-4.48 10-10S17.52 2 12 2zm0 18.2a8.2 8.2 0 0 1-4.18-1.14l-.3-.18-3.1.81.83-3.02-.2-.31A8.2 8.2 0 1 1 12 20.2z"
+            fill={color}
+          />
+        </Svg>
+      );
+
+    case 'paperclip':
+    case 'paperClip':
+    case 'attachment':
+      return (
+        <Svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round">
+          <Path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+        </Svg>
+      );
+
+    case 'image':
+      return (
+        <Svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round">
+          <Rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+          <Circle cx="8.5" cy="8.5" r="1.5" />
+          <Polyline points="21 15 16 10 5 21" />
+        </Svg>
+      );
+
+    case 'camera':
+      return (
+        <Svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round">
+          <Path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
+          <Circle cx="12" cy="13" r="4" />
+        </Svg>
+      );
+
+    case 'x':
+    case 'close':
+      return (
+        <Svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round">
+          <Line x1="18" y1="6" x2="6" y2="18" />
+          <Line x1="6" y1="6" x2="18" y2="18" />
         </Svg>
       );
 

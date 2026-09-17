@@ -10,6 +10,7 @@ const socketService = require('./services/socketService');
 const sessionManager = require('./services/sessionManager');
 const errorHandler = require('./middlewares/errorHandler');
 
+const path = require('path');
 const app = express();
 const server = http.createServer(app);
 
@@ -22,6 +23,9 @@ app.use(cors({
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+// Serve static uploaded files (chat images, etc.)
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 // Request logger
 app.use((req, res, next) => {

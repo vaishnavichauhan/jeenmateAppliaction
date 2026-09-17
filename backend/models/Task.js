@@ -17,9 +17,10 @@ const Task = {
       query += ` AND (
         t.user_id = ? 
         OR t.assigned_by_id = ? 
-        OR (t.created_by_id = ? AND t.assigned_to_id IS NOT NULL)
+        OR t.created_by_id = ?
+        OR t.assigned_to_id = ?
       )`;
-      params.push(userId, userId, userId);
+      params.push(userId, userId, userId, userId);
     }
 
     if (status && status !== 'all') {
@@ -102,8 +103,9 @@ const Task = {
       `SELECT COUNT(*) as count FROM tasks 
        WHERE user_id = ? 
           OR assigned_by_id = ? 
-          OR (created_by_id = ? AND assigned_to_id IS NOT NULL)`,
-      [userId, userId, userId]
+          OR created_by_id = ?
+          OR assigned_to_id = ?`,
+      [userId, userId, userId, userId]
     );
 
     return {
@@ -114,16 +116,16 @@ const Task = {
     };
   },
 
-  async create({ id, customerId, customerName, customerPhone, originalMessage, staffNote, dueDate, status = 'pending', userId, createdByName, assignedToUserId }) {
+  async create({ id, customerId, customerName, customerPhone, originalMessage, staffNote, dueDate, status = 'pending', userId, createdByName, assignedToUserId, eventType = 'Self' }) {
     const ownerUserId = assignedToUserId || userId || null;
     const assignedId = assignedToUserId || null;
     const assignedById = assignedToUserId ? (userId || null) : null;
     const assignedByName = assignedToUserId ? (createdByName || null) : null;
 
     await pool.execute(
-      `INSERT INTO tasks (id, customer_id, customer_name, customer_phone, original_message, staff_note, due_date, status, user_id, created_by_id, created_by_name, assigned_to_id, assigned_by_id, assigned_by_name)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [id, customerId || null, customerName, customerPhone, originalMessage || '', staffNote || '', dueDate, status, ownerUserId, userId || null, createdByName || null, assignedId, assignedById, assignedByName]
+      `INSERT INTO tasks (id, customer_id, customer_name, customer_phone, original_message, staff_note, due_date, status, user_id, created_by_id, created_by_name, assigned_to_id, assigned_by_id, assigned_by_name, event_type)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [id, customerId || null, customerName, customerPhone, originalMessage || '', staffNote || '', dueDate, status, ownerUserId, userId || null, createdByName || null, assignedId, assignedById, assignedByName, eventType || 'Self']
     );
     return this.findById(id);
   },

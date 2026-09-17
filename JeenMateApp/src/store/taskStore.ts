@@ -10,6 +10,8 @@ export interface TeamMember {
   avatar?: string;
 }
 
+export type TaskEventType = 'PhoneCall' | 'WhatsappCall' | 'WhatsappChat' | 'JeenmateChat' | 'Self';
+
 export interface CRMTask {
   id: string;
   customer_id?: string | null;
@@ -29,6 +31,7 @@ export interface CRMTask {
   created_by_name?: string;
   assigned_by_id?: number;
   assigned_by_name?: string;
+  event_type?: TaskEventType;
 }
 
 interface TaskCounts {
@@ -68,6 +71,7 @@ interface TaskState {
     staffNote?: string;
     dueDate?: string;
     assignedToUserId?: number | null;
+    eventType?: TaskEventType;
   }) => Promise<boolean>;
   assignTask: (taskId: string, assignedToUserId: number) => Promise<{ success: boolean; message: string }>;
   toggleTaskStatus: (taskId: string) => Promise<void>;
@@ -164,18 +168,33 @@ export const useTaskStore = create<TaskState>((set, get) => ({
   setSearchQuery: (searchQuery) => set({ searchQuery }),
   setSelectedCustomer: (selectedCustomer) => set({ selectedCustomer }),
 
-  addTask: async (newTaskData) => {
+  addTask: async (newTaskData: any) => {
+    const customerName = (newTaskData.customerName || newTaskData.customer_name || '').trim();
+    const customerPhone = (newTaskData.customerPhone || newTaskData.customer_phone || '').trim();
+    const originalMessage = newTaskData.originalMessage || newTaskData.original_message || '';
+    const staffNote = newTaskData.staffNote || newTaskData.staff_note || '';
+    const dueDate = newTaskData.dueDate || newTaskData.due_date || new Date(Date.now() + 24 * 3600 * 1000).toISOString().split('T')[0];
+    const assignedToUserId = newTaskData.assignedToUserId ?? newTaskData.assigned_to_id ?? newTaskData.assigned_to_user_id ?? null;
+    const eventType = newTaskData.eventType || newTaskData.event_type || 'Self';
+    const customerId = newTaskData.customerId || newTaskData.customer_id || null;
+
+    if (!customerName || !customerPhone) {
+      throw new Error('Customer name and phone number are required.');
+    }
+
     const localId = `task_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`;
     const newTask: CRMTask = {
       id: localId,
-      customer_id: newTaskData.customerId || null,
-      customer_name: newTaskData.customerName,
-      customer_phone: newTaskData.customerPhone,
-      original_message: newTaskData.originalMessage || '',
-      staff_note: newTaskData.staffNote || '',
-      due_date: newTaskData.dueDate || new Date(Date.now() + 24 * 3600 * 1000).toISOString().split('T')[0],
+      customer_id: customerId,
+      customer_name: customerName,
+      customer_phone: customerPhone,
+      original_message: originalMessage,
+      staff_note: staffNote,
+      due_date: dueDate,
       status: 'pending',
       created_at: new Date().toISOString(),
+      event_type: eventType,
+      assigned_to_id: assignedToUserId,
     };
 
     // Optimistic update
@@ -186,12 +205,25 @@ export const useTaskStore = create<TaskState>((set, get) => ({
     });
 
     try {
-      await apiClient.post('/api/tasks', newTaskData);
-      await AsyncStorage.setItem(STORAGE_KEY_TASKS, JSON.stringify(updatedTasks));
-      await get().fetchTasks();
+      const res = await apiClient.post('/api/tasks', {
+        customerId,
+        customerName,
+        customerPhone,
+        originalMessage,
+        staffNote,
+        dueDate,
+        assignedToUserId,
+        eventType,
+      });
+
+      if (res.data?.success) {
+        await get().fetchTasks();
+      } else {
+        await AsyncStorage.setItem(STORAGE_KEY_TASKS, JSON.stringify(updatedTasks));
+      }
       return true;
-    } catch (err) {
-      console.warn('[TaskStore] Task saved locally offline');
+    } catch (err: any) {
+      console.warn('[TaskStore] Saved locally, remote failed:', err?.response?.data || err.message);
       await AsyncStorage.setItem(STORAGE_KEY_TASKS, JSON.stringify(updatedTasks));
       return true;
     }

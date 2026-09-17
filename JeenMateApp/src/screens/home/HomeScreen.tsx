@@ -129,6 +129,112 @@ export const HomeScreen: React.FC = () => {
     };
   };
 
+  // Helper: get event badge info using task.event_type with legacy fallback
+  const getTaskEventInfo = (task: CRMTask) => {
+    if (task.event_type) {
+      switch (task.event_type) {
+        case 'PhoneCall': {
+          const callInfo = parseCallEventInfo(task.original_message);
+          return {
+            eventType: 'PhoneCall',
+            eventIcon: (callInfo?.eventIcon || 'phone') as 'phone' | 'video' | 'whatsapp' | 'chat',
+            eventColor: callInfo?.eventColor || '#2563EB',
+            callDate: callInfo?.callDate || null,
+            callTime: callInfo?.callTime || null,
+            duration: callInfo?.duration || null,
+          };
+        }
+        case 'WhatsappCall': {
+          const callInfo = parseCallEventInfo(task.original_message);
+          return {
+            eventType: 'WhatsappCall',
+            eventIcon: (callInfo?.eventIcon || 'phone') as 'phone' | 'video' | 'whatsapp' | 'chat',
+            eventColor: '#0D9488',
+            callDate: callInfo?.callDate || null,
+            callTime: callInfo?.callTime || null,
+            duration: callInfo?.duration || null,
+          };
+        }
+        case 'WhatsappChat':
+          return {
+            eventType: 'WhatsappChat',
+            eventIcon: 'whatsapp' as const,
+            eventColor: '#00A884',
+            callDate: null,
+            callTime: null,
+            duration: null,
+          };
+        case 'JeenmateChat':
+          return {
+            eventType: 'JeenmateChat',
+            eventIcon: 'chat' as const,
+            eventColor: '#7C3AED',
+            callDate: null,
+            callTime: null,
+            duration: null,
+          };
+        case 'Self':
+          return {
+            eventType: 'Self',
+            eventIcon: 'calendar' as const,
+            eventColor: '#D97706',
+            callDate: null,
+            callTime: null,
+            duration: null,
+          };
+        default:
+          return {
+            eventType: String(task.event_type),
+            eventIcon: 'calendar' as const,
+            eventColor: '#64748B',
+            callDate: null,
+            callTime: null,
+            duration: null,
+          };
+      }
+    }
+
+    const legacy = parseCallEventInfo(task.original_message);
+    if (legacy) {
+      const isWhatsapp = task.original_message?.toLowerCase().includes('whatsapp');
+      return {
+        ...legacy,
+        eventType: isWhatsapp ? 'WhatsappCall' : 'PhoneCall',
+      };
+    }
+
+    if (task.original_message?.toLowerCase().includes('whatsapp')) {
+      return {
+        eventType: 'WhatsappChat',
+        eventIcon: 'whatsapp' as const,
+        eventColor: '#00A884',
+        callDate: null,
+        callTime: null,
+        duration: null,
+      };
+    }
+
+    if (task.original_message?.toLowerCase().includes('jeenmate')) {
+      return {
+        eventType: 'JeenmateChat',
+        eventIcon: 'chat' as const,
+        eventColor: '#7C3AED',
+        callDate: null,
+        callTime: null,
+        duration: null,
+      };
+    }
+
+    return {
+      eventType: 'Self',
+      eventIcon: 'calendar' as const,
+      eventColor: '#D97706',
+      callDate: null,
+      callTime: null,
+      duration: null,
+    };
+  };
+
   // Helper: separate date and time from due_date string (e.g. "16/09/2026 3:55pm")
   const parseDueDateAndTime = (dueStr?: string) => {
     if (!dueStr) return { date: null, time: null };
@@ -141,6 +247,26 @@ export const HomeScreen: React.FC = () => {
       };
     }
     return { date: trimmed, time: null };
+  };
+
+  // Helper: format created_at date and time
+  const formatDateTimeParts = (rawDate?: string) => {
+    if (!rawDate) return { date: '-', time: '-' };
+    const normalized = rawDate.includes('T') || rawDate.endsWith('Z')
+      ? rawDate
+      : `${rawDate.replace(' ', 'T')}Z`;
+    let d = new Date(normalized);
+    if (isNaN(d.getTime())) {
+      d = new Date(rawDate);
+    }
+    if (isNaN(d.getTime())) {
+      return { date: rawDate, time: '-' };
+    }
+    const day = String(d.getDate()).padStart(2, '0');
+    const month = String(d.getMonth() + 1).padStart(2, '0');
+    const year = d.getFullYear();
+    const timeStr = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', hour12: true });
+    return { date: `${day}/${month}/${year}`, time: timeStr };
   };
 
   // Keyboard listener for add task modal
@@ -261,6 +387,7 @@ export const HomeScreen: React.FC = () => {
         staffNote: newStaffNote.trim(),
         dueDate: combinedDue,
         assignedToUserId: newAssignedUser ? newAssignedUser.id : null,
+        eventType: 'Self',
       });
 
       setNewCustomerName('');
@@ -330,25 +457,41 @@ export const HomeScreen: React.FC = () => {
     };
 
     const assignerDisplay = formatAssignerName(assignerRawName);
-    const eventInfo = parseCallEventInfo(item.original_message);
+    const eventInfo = getTaskEventInfo(item);
     const { date: dueDatePart, time: dueTimePart } = parseDueDateAndTime(item.due_date);
     const displayDate = dueDatePart || eventInfo?.callDate || null;
     const displayTime = dueTimePart || eventInfo?.callTime || null;
 
+    const getCleanEventDescription = () => {
+      if (!item.original_message || !item.original_message.trim()) {
+        return item.customer_name ? `Task for ${item.customer_name}` : 'Self Task';
+      }
+      const msg = item.original_message.trim();
+      if (msg.startsWith('Call Log')) {
+        const cleaned = msg.replace(/^Call Log\s*\[[^\]]+\]:\s*/i, '');
+        return cleaned || msg;
+      }
+      return msg;
+    };
+
+    const eventDescription = getCleanEventDescription();
+    const { date: createdDate, time: createdTime } = formatDateTimeParts(item.created_at);
+    const eventColor = eventInfo?.eventColor || '#2563EB';
+
     return (
-      <View style={[styles.taskCard, isDone && styles.taskCardCompleted]}>
+      <View style={[styles.taskCard, isDone && styles.taskCardCompleted, { borderLeftColor: isDone ? '#10B981' : eventColor }]}>
         {/* Top Accent Strip */}
-        <View style={[styles.taskAccentStrip, isDone ? styles.taskAccentDone : styles.taskAccentPending]} />
+        {/* <View style={[styles.taskAccentStrip, { backgroundColor: isDone ? '#10B981' : eventColor }]} /> */}
 
         <View style={styles.taskCardInner}>
-          {/* Row 1: Checkbox + Name + Status + Delete */}
+          {/* Header Row: Checkbox + Customer Name (& Phone) + Status Badge + Delete Button */}
           <View style={styles.taskCardHeader}>
             <TouchableOpacity
               style={[styles.checkbox, isDone && styles.checkboxCompleted]}
               onPress={() => toggleTaskStatus(item.id)}
               activeOpacity={0.7}
             >
-              {isDone ? <Icon name="check" size={14} color={COLORS.bgWhite} strokeWidth={3} /> : null}
+              {isDone ? <Icon name="check" size={13} color={COLORS.bgWhite} strokeWidth={3} /> : null}
             </TouchableOpacity>
 
             <View style={styles.customerInfo}>
@@ -356,7 +499,10 @@ export const HomeScreen: React.FC = () => {
                 {item.customer_name}
               </Text>
               {item.customer_phone && item.customer_phone !== 'N/A' ? (
-                <Text style={styles.customerPhone} numberOfLines={1}>{item.customer_phone}</Text>
+                <View style={styles.customerPhoneBadge}>
+                  <Icon name="phone" size={10} color={COLORS.textMuted} />
+                  <Text style={styles.customerPhone} numberOfLines={1}>{item.customer_phone}</Text>
+                </View>
               ) : null}
             </View>
 
@@ -371,96 +517,114 @@ export const HomeScreen: React.FC = () => {
               style={styles.deleteIconButton}
               onPress={() => handleDeleteTask(item)}
               hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              activeOpacity={0.6}
             >
-              <Icon name="trash" size={16} color="#94A3B8" />
+              <Icon name="trash" size={14} color="#EF4444" />
             </TouchableOpacity>
           </View>
 
-          {/* Row 2: Event Details (Event Type, Date, Time) - Only show event type if available */}
-          {(eventInfo || displayDate || displayTime) ? (
-            <View style={styles.eventDetailsRow}>
-              {/* Event Type (Only show if available, not shown for self-added tasks) */}
-              {eventInfo?.eventType ? (
-                <View style={[styles.eventTypeBadge, { backgroundColor: eventInfo.eventColor + '12', borderColor: eventInfo.eventColor + '30' }]}>
-                  <Icon name={eventInfo.eventIcon} size={11} color={eventInfo.eventColor} />
-                  <Text style={[styles.eventTypeText, { color: eventInfo.eventColor }]}>
-                    {eventInfo.eventType}
-                  </Text>
-                </View>
-              ) : null}
-
-              {/* Date */}
-              {displayDate ? (
-                <View style={styles.eventMetaBadge}>
-                  <Icon name="calendar" size={11} color="#64748B" />
-                  <Text style={styles.eventMetaText}>{displayDate}</Text>
-                </View>
-              ) : null}
-
-              {/* Time */}
-              {displayTime ? (
-                <View style={styles.eventMetaBadge}>
-                  <Icon name="clock" size={11} color="#64748B" />
-                  <Text style={styles.eventMetaText}>{displayTime}</Text>
-                </View>
-              ) : null}
-
-              {/* Call Duration if available */}
-              {eventInfo?.duration ? (
-                <View style={styles.durationBadge}>
-                  <Text style={styles.durationBadgeText}>{eventInfo.duration}</Text>
-                </View>
-              ) : null}
-            </View>
-          ) : null}
-
-          {/* Staff Note */}
-          {item.staff_note ? (
-            <View style={styles.noteBox}>
-              <View style={styles.noteIconRow}>
-                <Icon name="edit" size={12} color={COLORS.primary} />
-                <Text style={styles.noteLabel}>Note</Text>
-              </View>
-              <Text style={styles.noteText} numberOfLines={3}>{item.staff_note}</Text>
-            </View>
-          ) : null}
-
-          {/* Original Message (Only show if real user message, not raw Call Log text) */}
-          {item.original_message && !item.original_message.startsWith('Call Log') ? (
-            <View style={styles.quoteBox}>
-              <Text style={styles.quoteText} numberOfLines={2}>
-                "{item.original_message}"
-              </Text>
-            </View>
-          ) : null}
-
-          {/* Footer: Assign info */}
-          <View style={styles.taskFooter}>
-            <View style={styles.footerLeft}>
-              {isAssignedByOther ? (
-                <View style={styles.assignedByPill}>
-                  <Text style={styles.assignedByPillText}>by {assignerDisplay}</Text>
-                </View>
-              ) : null}
-            </View>
-
-            {item.assigned_to_name ? (
-              <View style={styles.assignedRightPill}>
-                <Icon name="user" size={11} color={COLORS.primary} />
-                <Text style={styles.assignedRightLabel}>
-                  Assigned:<Text style={styles.assignedRightName}>{item.assigned_to_name}</Text>
+          {/* Event Inset Box */}
+          <View style={styles.eventSectionBox}>
+            {/* 1. Event Type badge in single line */}
+            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+              <View style={[styles.eventTypeBadge, { backgroundColor: eventColor + '18', borderColor: eventColor + '40' }]}>
+                <Icon name={eventInfo?.eventIcon || 'calendar'} size={11} color={eventColor} />
+                <Text style={[styles.eventTypeText, { color: eventColor }]}>
+                  {eventInfo?.eventType || item.event_type || 'Self'}
                 </Text>
               </View>
-            ) : (
-              <TouchableOpacity
-                style={styles.assignButton}
-                onPress={() => handleOpenAssignModal(item)}
-                activeOpacity={0.7}
-              >
-                <Icon name="user-plus" size={12} color={COLORS.primary} />
-                <Text style={styles.assignButtonText}>Assign</Text>
-              </TouchableOpacity>
-            )}
+            </View>
+
+            {/* Event Description (no left label) */}
+            {eventDescription ? (
+              <View style={styles.descBubble}>
+                <Text style={styles.cardFieldDescValue} numberOfLines={3}>
+                  "{eventDescription}"
+                </Text>
+              </View>
+            ) : null}
+
+            {/* Event Time and Date (no left label) */}
+            {(displayDate || displayTime) ? (
+              <View style={styles.cardPillsRow}>
+                {displayDate ? (
+                  <View style={styles.metaPill}>
+                    <Icon name="calendar" size={11} color="#475569" />
+                    <Text style={styles.metaPillText}>{displayDate}</Text>
+                  </View>
+                ) : null}
+                {displayTime ? (
+                  <View style={styles.metaPill}>
+                    <Icon name="clock" size={11} color="#475569" />
+                    <Text style={styles.metaPillText}>{displayTime}</Text>
+                  </View>
+                ) : null}
+                {eventInfo?.duration ? (
+                  <View style={styles.durationPill}>
+                    <Text style={styles.durationPillText}>⏱️ {eventInfo.duration}</Text>
+                  </View>
+                ) : null}
+              </View>
+            ) : null}
+          </View>
+
+          {/* One horizontal thin line */}
+          <View style={styles.cardDivider} />
+
+          {/* 4. Notes */}
+          <View style={[styles.cardFieldRow, { alignItems: 'center' }]}>
+            <Text style={styles.cardFieldLabel}>Notes :</Text>
+            <Text style={styles.cardFieldNotesValue} numberOfLines={3}>
+              {item.staff_note?.trim() ? item.staff_note : '-'}
+            </Text>
+          </View>
+
+          {/* 5. Our Create Date and Time */}
+          <View style={styles.cardFieldRow}>
+            <Text style={styles.cardFieldLabel}>Created :</Text>
+            <View style={styles.cardPillsRow}>
+              <View style={styles.createdPill}>
+                <Icon name="calendar" size={11} color="#64748B" />
+                <Text style={styles.createdPillText}>{createdDate}</Text>
+              </View>
+              <View style={styles.createdPill}>
+                <Icon name="clock" size={11} color="#64748B" />
+                <Text style={styles.createdPillText}>{createdTime}</Text>
+              </View>
+            </View>
+          </View>
+
+          {/* 6. Assign / Assigned */}
+          <View style={[styles.cardFieldRow, { alignItems: 'center', marginTop: 6 }]}>
+            <Text style={styles.cardFieldLabel}>Assign :</Text>
+            <View style={styles.cardFieldValueCol}>
+              {item.assigned_to_name ? (
+                <View style={styles.assignedBadgeContainer}>
+                  <View style={styles.assignedBadge}>
+                    <View style={styles.assignedInitialCircle}>
+                      <Text style={styles.assignedInitialText}>
+                        {item.assigned_to_name.charAt(0).toUpperCase()}
+                      </Text>
+                    </View>
+                    <Text style={styles.assignedBadgeText}>
+                      Assigned: <Text style={styles.assignedBadgeName}>{item.assigned_to_name}</Text>
+                    </Text>
+                  </View>
+                  {isAssignedByOther ? (
+                    <Text style={styles.assignedByText}>(by {assignerDisplay})</Text>
+                  ) : null}
+                </View>
+              ) : (
+                <TouchableOpacity
+                  style={styles.cardAssignBtn}
+                  onPress={() => handleOpenAssignModal(item)}
+                  activeOpacity={0.75}
+                >
+                  <Icon name="user-plus" size={12} color="#FFFFFF" />
+                  <Text style={styles.cardAssignBtnText}>+ Assign</Text>
+                </TouchableOpacity>
+              )}
+            </View>
           </View>
         </View>
       </View>
@@ -494,7 +658,7 @@ export const HomeScreen: React.FC = () => {
             </View>
             <View>
               <Text style={styles.adminSectionTitle}>Team Management</Text>
-              <Text style={styles.adminSectionSub}>Add new staff members</Text>
+              <Text style={styles.adminSectionSub}>Add new members</Text>
             </View>
           </View>
           <TouchableOpacity
@@ -659,6 +823,18 @@ export const HomeScreen: React.FC = () => {
               keyboardShouldPersistTaps="handled"
               nestedScrollEnabled={true}
             >
+              {/* Task Info Section */}
+              <View style={styles.taskInfoSection}>
+                <Text style={styles.taskInfoHeading}>Task Info</Text>
+                <View style={styles.infoDetailsBox}>
+                  {/* Event Type */}
+                  <View style={[styles.infoDetailRow, { borderBottomWidth: 0, paddingBottom: 0 }]}>
+                    <Text style={styles.infoDetailLabel}>Event Type :</Text>
+                    <Text style={styles.infoDetailValue}>Self</Text>
+                  </View>
+                </View>
+              </View>
+
               {/* Date & Time Row */}
               <View style={styles.dateTimeRow}>
                 <View style={styles.dateTimeCol}>
@@ -1198,24 +1374,26 @@ const styles = StyleSheet.create({
   },
   taskCard: {
     backgroundColor: COLORS.bgWhite,
-    borderRadius: RADIUS.lg,
-    marginBottom: 14,
+    borderRadius: 16,
+    marginBottom: 16,
     borderWidth: 1,
-    borderColor: '#E8ECF1',
-    shadowColor: '#1A3B71',
+    borderLeftWidth: 1.5,
+    borderColor: '#E2E8F0',
+    shadowColor: '#0F172A',
     shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.06,
-    shadowRadius: 12,
+    shadowOpacity: 0.08,
+    shadowRadius: 10,
     elevation: 3,
     overflow: 'hidden',
   },
   taskCardCompleted: {
-    opacity: 0.7,
-    borderColor: '#D1FAE5',
+    opacity: 0.8,
+    borderColor: '#A7F3D0',
+    borderLeftColor: '#10B981',
   },
   taskAccentStrip: {
-    height: 3,
-    width: '100%',
+    // height: 1,
+    // width: '100%',
   },
   taskAccentPending: {
     backgroundColor: COLORS.primary,
@@ -1303,16 +1481,211 @@ const styles = StyleSheet.create({
     color: '#059669',
   },
   deleteIconButton: {
-    padding: 6,
+    padding: 7,
     borderRadius: 8,
-    backgroundColor: '#F8FAFC',
+    backgroundColor: '#FEF2F2',
+    borderWidth: 1,
+    borderColor: '#FEE2E2',
   },
-  eventDetailsRow: {
+  customerPhoneBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    marginTop: 2,
+  },
+  eventSectionBox: {
+    backgroundColor: '#F8FAFC',
+    borderRadius: 12,
+    padding: 10,
+    marginTop: 10,
+    borderWidth: 1,
+    borderColor: '#EEF2F6',
+    gap: 7,
+  },
+  eventSectionHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 1,
+  },
+  eventSectionTag: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: '#475569',
+    textTransform: 'uppercase',
+    letterSpacing: 0.8,
+    backgroundColor: '#EEF2F6',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+  },
+  cardFieldRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+  },
+  cardFieldLabel: {
+    fontSize: 11.5,
+    fontWeight: '700',
+    color: '#64748B',
+    width: 78,
+    textTransform: 'uppercase',
+    letterSpacing: 0.3,
+    paddingTop: 2,
+  },
+  cardFieldValueCol: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+  },
+  descBubble: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    marginVertical: 3,
+  },
+  cardFieldDescValue: {
+    fontSize: 12.5,
+    fontWeight: '600',
+    color: '#B45309',
+    lineHeight: 18,
+    fontStyle: 'italic',
+  },
+  notesBubble: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 6,
+    backgroundColor: '#EFF6FF',
+    borderRadius: 8,
+    paddingHorizontal: 9,
+    paddingVertical: 6,
+    borderWidth: 1,
+    borderColor: '#DBEAFE',
+  },
+  cardFieldNotesValue: {
+    flex: 1,
+    fontSize: 12.5,
+    color: '#1E293B',
+    lineHeight: 18,
+    fontWeight: '500',
+  },
+  cardPillsRow: {
+    flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
     flexWrap: 'wrap',
-    marginTop: 8,
+  },
+  metaPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: '#FFFFFF',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: RADIUS.full,
+    borderWidth: 1,
+    borderColor: '#CBD5E1',
+  },
+  metaPillText: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#334155',
+  },
+  durationPill: {
+    backgroundColor: '#F1F5F9',
+    paddingHorizontal: 7,
+    paddingVertical: 3,
+    borderRadius: RADIUS.full,
+    borderWidth: 1,
+    borderColor: '#CBD5E1',
+  },
+  durationPillText: {
+    fontSize: 10.5,
+    fontWeight: '700',
+    color: '#475569',
+  },
+  createdPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: '#F8FAFC',
+    paddingHorizontal: 8,
+    paddingVertical: 3.5,
+    borderRadius: RADIUS.full,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+  },
+  createdPillText: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#475569',
+  },
+  cardDivider: {
+    height: 1,
+    backgroundColor: '#EEF2F6',
+    marginVertical: 9,
+  },
+  assignedBadgeContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    flexWrap: 'wrap',
+  },
+  assignedBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: '#EFF6FF',
+    paddingHorizontal: 9,
+    paddingVertical: 4,
+    borderRadius: RADIUS.full,
+    borderWidth: 1,
+    borderColor: '#DBEAFE',
+  },
+  assignedInitialCircle: {
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: COLORS.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  assignedInitialText: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: '#FFFFFF',
+  },
+  assignedBadgeText: {
+    fontSize: 11.5,
+    color: COLORS.textMuted,
+    fontWeight: '600',
+  },
+  assignedBadgeName: {
+    fontWeight: '700',
+    color: COLORS.primary,
+  },
+  assignedByText: {
+    fontSize: 11,
+    color: COLORS.textMuted,
+    fontStyle: 'italic',
+  },
+  cardAssignBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    backgroundColor: COLORS.primary,
+    paddingHorizontal: 12,
+    paddingVertical: 5.5,
+    borderRadius: RADIUS.full,
+  },
+  cardAssignBtnText: {
+    color: '#FFFFFF',
+    fontSize: 11.5,
+    fontWeight: '700',
   },
   eventTypeBadge: {
     flexDirection: 'row',
@@ -1909,6 +2282,44 @@ const styles = StyleSheet.create({
   },
   chipAvatarTextActive: {
     color: COLORS.bgWhite,
+  },
+  taskInfoSection: {
+    marginBottom: SPACING.md,
+  },
+  taskInfoHeading: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: COLORS.textMuted,
+    textTransform: 'uppercase',
+    letterSpacing: 0.8,
+    marginBottom: SPACING.xs + 2,
+  },
+  infoDetailsBox: {
+    backgroundColor: '#F8FAFC',
+    borderRadius: RADIUS.md,
+    padding: SPACING.sm + 2,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+  },
+  infoDetailRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    paddingBottom: 6,
+    borderBottomWidth: 1,
+    borderBottomColor: '#F1F5F9',
+  },
+  infoDetailLabel: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: COLORS.textMuted,
+    flex: 0.42,
+  },
+  infoDetailValue: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: COLORS.textDark,
+    flex: 0.58,
+    textAlign: 'right',
   },
 });
 

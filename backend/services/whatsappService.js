@@ -77,7 +77,8 @@ class WhatsAppService {
           '--disable-accelerated-2d-canvas',
           '--no-first-run',
           '--no-zygote',
-          '--disable-gpu'
+          '--disable-gpu',
+          '--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
         ]
       };
 
@@ -90,6 +91,10 @@ class WhatsAppService {
           dataPath: config.WHATSAPP_SESSION_PATH,
           clientId: `user-${this.userId}`
         }),
+        webVersionCache: {
+          type: 'remote',
+          remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-js/main/dist/wppconnect-wa.js'
+        },
         puppeteer: puppeteerOptions
       });
 
@@ -247,7 +252,8 @@ class WhatsAppService {
         const rawNumber = String(targetJid).replace('@c.us', '').replace('@lid', '').split(':')[0];
         const phoneNumber = rawNumber.startsWith('+') ? rawNumber : `+${rawNumber}`;
         const mediaType = call.isVideo ? 'video' : 'voice';
-        const callType = fromMe ? 'outgoing' : (call.isMissed ? 'missed' : 'incoming');
+        const callType = fromMe ? 'outgoing' : 'incoming';
+        const callStatus = 'unknown'; // Live event is ringing/started - status is unknown until historical sync or call completion
 
         let customerName = phoneNumber;
         try {
@@ -268,17 +274,51 @@ class WhatsAppService {
           }
         } catch (_) { }
 
-        await pool.execute(
-          `INSERT INTO whatsapp_calls (call_id, phone_number, customer_name, call_type, media_type, created_at, user_id)
-           VALUES (?, ?, ?, ?, ?, NOW(), ?)`,
-          [call.id || `call_${Date.now()}`, phoneNumber, customerName, callType, mediaType, this.userId]
-        );
-        console.log(`[WhatsApp:${this.userId}] Saved call log: ${callType} ${mediaType} call for ${customerName}`);
+        const safeCallId = (call.id && typeof call.id === 'string')
+          ? call.id
+          : ((call.id && typeof call.id === 'object' && call.id._serialized)
+              ? call.id._serialized
+              : ((call.id && typeof call.id === 'object' && call.id.id)
+                  ? call.id.id
+                  : `call_evt_${Date.now()}`));
 
-        // Also insert call message into conversation timeline & emit live Socket.IO update
+        const rawCallJson = JSON.stringify({
+          id: safeCallId,
+          from: targetJid,
+          timestamp: call.timestamp || Math.floor(Date.now() / 1000),
+          isGroup: !!call.isGroup,
+          isVideo: !!call.isVideo,
+          isVideoCall: !!call.isVideo,
+          fromMe: fromMe,
+          raw: call
+        });
+
+        // Upsert into whatsapp_calls table
+        const [existingCalls] = await pool.execute(
+          'SELECT id FROM whatsapp_calls WHERE call_id = ? AND user_id = ? LIMIT 1',
+          [safeCallId, this.userId]
+        );
+
+        if (existingCalls.length > 0) {
+          await pool.execute(
+            `UPDATE whatsapp_calls 
+             SET phone_number = ?, customer_name = ?, call_type = ?, media_type = ?, raw_call = ?
+             WHERE id = ?`,
+            [phoneNumber, customerName, callType, mediaType, rawCallJson, existingCalls[0].id]
+          );
+        } else {
+          await pool.execute(
+            `INSERT INTO whatsapp_calls (call_id, phone_number, customer_name, call_type, media_type, duration, raw_call, created_at, user_id, account_phone)
+             VALUES (?, ?, ?, ?, ?, NULL, ?, NOW(), ?, ?)`,
+            [safeCallId, phoneNumber, customerName, callType, mediaType, rawCallJson, this.userId, this.botPhone || null]
+          );
+        }
+        console.log(`[WhatsApp:${this.userId}] Saved provisional live call log: ${callType} ${mediaType} call for ${customerName}`);
+
+        // Insert or update provisional call message in conversation timeline & emit live Socket.IO update
         const callMsgText = mediaType === 'video'
-          ? (callType === 'missed' ? '📹 Missed video call' : (fromMe ? '📹 Outgoing video call' : '📹 Video call'))
-          : (callType === 'missed' ? '📞 Missed voice call' : (fromMe ? '📞 Outgoing voice call' : '📞 Voice call'));
+          ? (fromMe ? '📹 Outgoing video call' : '📹 Video call')
+          : (fromMe ? '📞 Outgoing voice call' : '📞 Voice call');
 
         try {
           const targetJidClean = String(targetJid).replace('@c.us', '').replace('@lid', '').split(':')[0];
@@ -294,13 +334,46 @@ class WhatsAppService {
             );
             if (conv.length > 0) {
               const convId = conv[0].id;
-              const utcStr = new Date().toISOString().slice(0, 19).replace('T', ' ');
-              const safeMsgId = (call.id && typeof call.id === 'string') ? call.id : `call_evt_${Date.now()}`;
-              const [insertMsg] = await pool.execute(
-                `INSERT INTO messages (conversation_id, customer_id, direction, message, whatsapp_message_id, message_type, status, created_at, user_id)
-                 VALUES (?, ?, ?, ?, ?, 'text', 'delivered', ?, ?)`,
-                [convId, customerId, fromMe ? 'outgoing' : 'incoming', callMsgText, safeMsgId, utcStr, this.userId]
+              const nowMs = Date.now();
+              const utcStr = new Date(nowMs).toISOString().slice(0, 19).replace('T', ' ');
+              const metadataObj = {
+                isCall: true,
+                status: callStatus,
+                callType: callType,
+                mediaType: mediaType,
+                duration: null,
+                whatsappCallId: safeCallId
+              };
+              const metadataJson = JSON.stringify(metadataObj);
+
+              // Check if provisional or exact call message already exists
+              const [existMsg] = await pool.execute(
+                `SELECT id, whatsapp_message_id, metadata FROM messages 
+                 WHERE conversation_id = ? AND (
+                   whatsapp_message_id = ? OR 
+                   (message_type = 'call' AND ABS(TIMESTAMPDIFF(SECOND, created_at, ?)) <= 30)
+                 ) 
+                 ORDER BY id DESC LIMIT 1`,
+                [convId, safeCallId, utcStr]
               );
+
+              let savedMsgId = null;
+              if (existMsg.length > 0) {
+                savedMsgId = existMsg[0].id;
+                await pool.execute(
+                  `UPDATE messages 
+                   SET whatsapp_message_id = ?, message_type = 'call', message = ?, whatsapp_timestamp = ?, metadata = ?
+                   WHERE id = ?`,
+                  [safeCallId, callMsgText, nowMs, metadataJson, savedMsgId]
+                );
+              } else {
+                const [insertMsg] = await pool.execute(
+                  `INSERT INTO messages (conversation_id, customer_id, direction, message, whatsapp_message_id, message_type, whatsapp_timestamp, status, created_at, user_id, metadata)
+                   VALUES (?, ?, ?, ?, ?, 'call', ?, 'delivered', ?, ?, ?)`,
+                  [convId, customerId, fromMe ? 'outgoing' : 'incoming', callMsgText, safeCallId, nowMs, utcStr, this.userId, metadataJson]
+                );
+                savedMsgId = insertMsg.insertId;
+              }
 
               await pool.execute(
                 'UPDATE conversations SET last_message_at = ? WHERE id = ?',
@@ -309,7 +382,7 @@ class WhatsAppService {
 
               const Message = require('../models/Message');
               const Conversation = require('../models/Conversation');
-              const savedMsg = await Message.findById(insertMsg.insertId);
+              const savedMsg = await Message.findById(savedMsgId);
               const updatedConv = await Conversation.findById(convId);
               socketService.broadcastNewMessage(convId, savedMsg);
               socketService.broadcastConversationUpdate(updatedConv);
@@ -460,7 +533,7 @@ class WhatsAppService {
     if (existCheck.length > 0) {
       const existingMsg = existCheck[0];
       if (!existingMsg.whatsapp_message_id && safeMsgId) {
-        await pool.execute('UPDATE messages SET whatsapp_message_id = ? WHERE id = ?', [safeMsgId, existingMsg.id]);
+        await pool.execute('UPDATE messages SET whatsapp_message_id = ?, whatsapp_timestamp = ? WHERE id = ?', [safeMsgId, msgTime, existingMsg.id]);
       }
       if (safeText === 'Video' && existingMsg.message === 'Images') {
         await pool.execute('UPDATE messages SET message = ? WHERE id = ?', ['Video', existingMsg.id]);
@@ -470,9 +543,9 @@ class WhatsAppService {
     }
 
     const [insertMsg] = await pool.execute(
-      `INSERT INTO messages (conversation_id, customer_id, direction, message, whatsapp_message_id, message_type, status, created_at, user_id)
-       VALUES (?, ?, ?, ?, ?, 'text', 'delivered', ?, ?)`,
-      [convId, customerId, direction, safeText, safeMsgId, utcStr, userId]
+      `INSERT INTO messages (conversation_id, customer_id, direction, message, whatsapp_message_id, message_type, whatsapp_timestamp, status, created_at, user_id)
+       VALUES (?, ?, ?, ?, ?, 'text', ?, 'delivered', ?, ?)`,
+      [convId, customerId, direction, safeText, safeMsgId, msgTime, utcStr, userId]
     );
 
     const savedMsg = await Message.findById(insertMsg.insertId);
@@ -633,17 +706,29 @@ class WhatsAppService {
                 } else if (typeof c.msgs.getModelsArray === 'function') {
                   const arr = c.msgs.getModelsArray();
                   if (arr && arr.length > 0) msg = arr[arr.length - 1];
+                } else if (Array.isArray(c.msgs._models) && c.msgs._models.length > 0) {
+                  msg = c.msgs._models[c.msgs._models.length - 1];
                 }
               }
-              if (c.lastReceivedKey) {
-                const msgCol = window.require ? window.require('WAWebCollections')?.Msg : null;
-                const recMsg = msgCol?.get ? msgCol.get(c.lastReceivedKey._serialized || c.lastReceivedKey) : null;
-                if (recMsg && (!msg || (recMsg.t || 0) >= (msg.t || 0))) {
-                  msg = recMsg;
-                }
+              if (!msg && c.previewMessage) {
+                msg = c.previewMessage;
               }
               if (!msg && c.lastMessage) {
                 msg = c.lastMessage;
+              }
+              if (!msg && c.lastReceivedKey) {
+                const msgCol = window.require ? window.require('WAWebCollections')?.Msg : null;
+                const recMsg = msgCol?.get ? msgCol.get(c.lastReceivedKey._serialized || c.lastReceivedKey) : (window.Store?.Msg?.get ? window.Store.Msg.get(c.lastReceivedKey._serialized || c.lastReceivedKey) : null);
+                if (recMsg) msg = recMsg;
+              }
+              if (!msg && window.Store?.Msg?.models) {
+                const cid = c.id?._serialized || String(c.id);
+                const userPart = c.id?.user;
+                const mList = window.Store.Msg.models.filter(m => {
+                  const r = m.id?.remote?._serialized || m.id?.remote || '';
+                  return r === cid || (userPart && r.includes(userPart));
+                });
+                if (mList.length > 0) msg = mList[mList.length - 1];
               }
               if (msg) {
                 if (msg.t) lastMsgTime = msg.t;
@@ -687,19 +772,19 @@ class WhatsAppService {
                 } else if (isAlbum) {
                   lastMsgText = msg.caption || 'Album';
                 } else if (mType === 'image' || b.startsWith('/9j/')) {
-                  lastMsgText = msg.caption || (b && !b.startsWith('/9j/') ? b : 'Images');
+                  lastMsgText = msg.caption || (b && !b.startsWith('/9j/') ? b : '📷 Photo');
                 } else if (mType === 'video') {
-                  lastMsgText = msg.caption || (b && !b.startsWith('/9j/') ? b : 'Video');
+                  lastMsgText = msg.caption || (b && !b.startsWith('/9j/') ? b : '🎥 Video');
                 } else if (mType === 'audio' || mType === 'ptt') {
-                  lastMsgText = 'Voice message';
+                  lastMsgText = '🎤 Voice message';
                 } else if (mType === 'document') {
-                  lastMsgText = msg.filename ? `📄 ${msg.filename}` : 'Document';
+                  lastMsgText = msg.filename ? `📄 ${msg.filename}` : '📄 Document';
                 } else if (mType === 'sticker') {
-                  lastMsgText = 'Sticker';
+                  lastMsgText = '🏷️ Sticker';
                 } else if (mType === 'location') {
-                  lastMsgText = 'Location';
+                  lastMsgText = '📍 Location';
                 } else if (mType === 'vcard' || mType === 'multi_vcard') {
-                  lastMsgText = 'Contact';
+                  lastMsgText = '👤 Contact';
                 } else if (mType === 'gp2') {
                   lastMsgText = 'Group update';
                 } else if (mType === 'e2e_notification') {
@@ -709,7 +794,7 @@ class WhatsAppService {
                 } else if (mType && mType !== 'chat') {
                   lastMsgText = `[${mType}]`;
                 } else {
-                  lastMsgText = b;
+                  lastMsgText = b || (msg.caption ? msg.caption : '');
                 }
 
                 fromMe = !!(msg.id?.fromMe || msg.fromMe);
@@ -904,10 +989,34 @@ class WhatsAppService {
             } catch (_) { }
           }
 
+          if (msgs.length === 0 && window.Store?.Msg?.models) {
+            const chatId = chat.id?._serialized || String(chat.id);
+            const userPart = chat.id?.user;
+            const storeMsgs = window.Store.Msg.models.filter(m => {
+              const r = m.id?.remote?._serialized || m.id?.remote || '';
+              return r === chatId || (userPart && r.includes(userPart));
+            });
+            if (storeMsgs.length > 0) {
+              msgs = [...storeMsgs];
+            }
+          }
+
+          if (msgs.length === 0) {
+            const fallbackMsg = chat.lastMessage || chat.previewMessage;
+            if (fallbackMsg) {
+              msgs = [fallbackMsg];
+            }
+          }
+
           // Deduplicate by message id if any overlaps
           const seen = new Set();
           const uniqueMsgs = [];
           for (const m of msgs) {
+            const msgTypeStr = String(m.type || 'chat').toLowerCase();
+            if (msgTypeStr === 'e2e_notification' || msgTypeStr === 'protocol' || msgTypeStr === 'gp2' || msgTypeStr === 'notification_template') {
+              continue;
+            }
+
             const rawId = m.id?._serialized || m.id?.id || (typeof m.id === 'string' ? m.id : null);
             if (rawId && seen.has(rawId)) continue;
             if (rawId) seen.add(rawId);
@@ -935,20 +1044,95 @@ class WhatsAppService {
               bodyStr.includes('video')
             );
 
-            const isMissedCall = isCallLog && (
+            // 1. Explicit missed check
+            const isMissed = isCallLog && (
               !!m.isMissed ||
               !!m.isMissedCall ||
               !!(m.call && (m.call.isMissed || m.call.isMissedCall)) ||
               !!(m._data && (m._data.isMissed || m._data.isMissedCall)) ||
+              m.subtype === 'missed' ||
+              (m._data && m._data.subtype === 'missed') ||
+              m.callResult === 1 ||
+              (m._data && m._data.callResult === 1) ||
+              m.webCallResult === 'MISSED' ||
+              m.webCallResult === 'UNANSWERED' ||
+              m.webCallResult === 'NO_ANSWER' ||
               subTypeStr.includes('missed') ||
               bodyStr.includes('missed') ||
               bodyStr.includes('no answer')
             );
 
+            // 2. Explicit rejected/declined check
+            const isRejected = isCallLog && !isMissed && (
+              m.subtype === 'rejected' ||
+              (m._data && m._data.subtype === 'rejected') ||
+              m.webCallResult === 'REJECTED' ||
+              m.webCallResult === 'DECLINED' ||
+              m.webCallResult === 'BUSY' ||
+              subTypeStr.includes('rejected') ||
+              subTypeStr.includes('declined') ||
+              bodyStr.includes('declined') ||
+              bodyStr.includes('rejected')
+            );
+
+            // Extract raw duration (integer seconds)
+            let rawDurationSec = null;
+            if (isCallLog) {
+              const d = m.duration !== undefined ? m.duration : (
+                m.callDuration !== undefined ? m.callDuration : (
+                  m.webCallDuration !== undefined ? m.webCallDuration : (
+                    m._data ? (m._data.duration !== undefined ? m._data.duration : m._data.callDuration) : null
+                  )
+                )
+              );
+              if (typeof d === 'number' && !isNaN(d) && d > 0 && d < 1e8) {
+                rawDurationSec = Math.round(d);
+              } else if (typeof d === 'string') {
+                const match = d.match(/(\d+)/);
+                if (match) {
+                  const p = parseInt(match[1], 10);
+                  if (p > 0) rawDurationSec = p;
+                }
+              }
+            }
+
+            // 3. Explicit answered/completed check
+            const isExplicitAnswered = isCallLog && !isMissed && !isRejected && (
+              (rawDurationSec !== null && rawDurationSec > 0) ||
+              m.webCallResult === 'CONNECTED' ||
+              m.webCallResult === 'ACCEPTED' ||
+              m.webCallResult === 'COMPLETED' ||
+              m.webCallResult === 'SUCCESS' ||
+              m.subtype === 'completed' ||
+              (m._data && m._data.subtype === 'completed')
+            );
+
+            let callStatus = 'unknown';
+            if (isMissed) {
+              callStatus = 'missed';
+              rawDurationSec = null;
+            } else if (isRejected) {
+              callStatus = 'rejected';
+              rawDurationSec = null;
+            } else if (isExplicitAnswered) {
+              callStatus = 'answered';
+            } else {
+              callStatus = 'unknown';
+              rawDurationSec = null;
+            }
+
             const isAlbum = mType === 'album' || m.isAlbum;
 
             if (isCallLog) {
-              bodyText = isVideoCall ? (isMissedCall ? 'Missed video call' : 'Video call') : (isMissedCall ? 'Missed voice call' : 'Voice call');
+              if (isVideoCall) {
+                bodyText = callStatus === 'missed'
+                  ? '📹 Missed video call'
+                  : (callStatus === 'rejected' ? '📹 Declined video call' : (isFromMe ? '📹 Outgoing video call' : '📹 Video call'));
+              } else {
+                bodyText = callStatus === 'missed'
+                  ? '📞 Missed voice call'
+                  : (callStatus === 'rejected' ? '📞 Declined voice call' : (isFromMe ? '📞 Outgoing voice call' : '📞 Voice call'));
+              }
             } else if (isAlbum) {
               bodyText = m.caption || 'Album';
             } else if (mType === 'video' || m.isVideo || (m._data && m._data.isVideo)) {
@@ -1000,13 +1184,29 @@ class WhatsAppService {
               ? (m.id.id || m.id._serialized || m.id.$1 || (typeof m.id === 'string' ? m.id : null))
               : `msg_${m.t}_${isFromMe ? 'out' : 'in'}`;
 
+            let metadata = null;
+            if (isCallLog) {
+              const waCallId = m.id
+                ? (m.id._serialized || m.id.id || (typeof m.id === 'string' ? m.id : null))
+                : null;
+              metadata = {
+                isCall: true,
+                status: callStatus,
+                callType: isFromMe ? 'outgoing' : 'incoming',
+                mediaType: isVideoCall ? 'video' : 'voice',
+                duration: rawDurationSec,
+                whatsappCallId: waCallId
+              };
+            }
+
             return {
               id: msgId,
               body: bodyText,
-              type: mType || 'text',
+              type: isCallLog ? 'call' : (mType || 'text'),
               timestamp: m.t || Math.floor(Date.now() / 1000),
               fromMe: isFromMe,
-              status: m.ack === 3 ? 'read' : (m.ack === 2 ? 'delivered' : 'sent')
+              status: m.ack === 3 ? 'read' : (m.ack === 2 ? 'delivered' : 'sent'),
+              metadata
             };
           });
         } catch (err) {
@@ -1109,56 +1309,62 @@ class WhatsAppService {
         const userId = this.userId;
         let customerId = null;
         const isLidJid = jid.includes('@lid');
-        const [byJid] = await pool.execute('SELECT id FROM customers WHERE user_id = ? AND whatsapp_jid = ? LIMIT 1', [userId, jid]);
+        const isGroupChat = chat.isGroup || jid.includes('@g.us');
+        
+        // Build the most reliable lookup: JID first, then phone, then suffix match
+        let byJid;
+        if (isGroupChat) {
+          // For groups: match by exact phone (group-xxx) or JID
+          [byJid] = await pool.execute(
+            'SELECT id, phone_number, name FROM customers WHERE user_id = ? AND (whatsapp_jid = ? OR phone_number = ?) LIMIT 1',
+            [userId, jid, phone]
+          );
+        } else {
+          // For individual chats: match by JID, exact phone, or 10-digit suffix
+          const cleanPhone = String(phone).replace(/[^0-9]/g, '');
+          const phoneSuffix = cleanPhone.length >= 10 ? cleanPhone.slice(-10) : '';
+          
+          if (phoneSuffix) {
+            [byJid] = await pool.execute(
+              `SELECT id, phone_number, name FROM customers WHERE user_id = ? AND (
+                whatsapp_jid = ? 
+                OR phone_number = ? 
+                OR RIGHT(REPLACE(REPLACE(phone_number, '+', ''), '-', ''), 10) = ?
+              ) LIMIT 1`,
+              [userId, jid, phone, phoneSuffix]
+            );
+          } else {
+            [byJid] = await pool.execute(
+              'SELECT id, phone_number, name FROM customers WHERE user_id = ? AND (whatsapp_jid = ? OR phone_number = ?) LIMIT 1',
+              [userId, jid, phone]
+            );
+          }
+        }
+        
         if (byJid.length > 0) {
           customerId = byJid[0].id;
           try {
-            // For LID contacts, only update phone if the current stored phone looks like a LID number
-            if (isLidJid) {
-              const [currentCust] = await pool.execute('SELECT phone_number FROM customers WHERE id = ?', [customerId]);
-              const currentPhone = currentCust[0]?.phone_number || '';
-              // Only overwrite if current phone is a LID-derived number (very long or doesn't start with country code pattern)
-              if (currentPhone.replace(/[^0-9]/g, '').length > 15 || !currentPhone) {
-                await pool.execute('UPDATE customers SET name = ?, phone_number = ? WHERE id = ?', [name, phone, customerId]);
-              } else {
-                await pool.execute('UPDATE customers SET name = ? WHERE id = ?', [name, customerId]);
-              }
+            if (name && name !== 'Contact' && !name.startsWith('+')) {
+              await pool.execute('UPDATE customers SET name = ?, whatsapp_jid = ? WHERE id = ?', [name, jid, customerId]);
             } else {
-              await pool.execute('UPDATE customers SET name = ?, phone_number = ? WHERE id = ?', [name, phone, customerId]);
-            }
-          } catch (_) {
-            await pool.execute('UPDATE customers SET name = ? WHERE id = ?', [name, customerId]);
-          }
-        } else {
-          const [byPhone] = await pool.execute('SELECT id FROM customers WHERE user_id = ? AND phone_number = ? LIMIT 1', [userId, phone]);
-          if (byPhone.length > 0) {
-            customerId = byPhone[0].id;
-            await pool.execute('UPDATE customers SET name = ?, whatsapp_jid = ? WHERE id = ?', [name, jid, customerId]);
-          } else if (isLidJid && name && name !== 'Contact') {
-            // For LID contacts, also try matching by name to avoid duplicates
-            const [byName] = await pool.execute('SELECT id FROM customers WHERE user_id = ? AND name = ? LIMIT 1', [userId, name]);
-            if (byName.length > 0) {
-              customerId = byName[0].id;
               await pool.execute('UPDATE customers SET whatsapp_jid = ? WHERE id = ?', [jid, customerId]);
             }
-          }
-
-          if (!customerId) {
-            try {
-              const [insCust] = await pool.execute(
-                'INSERT INTO customers (name, phone_number, whatsapp_jid, user_id) VALUES (?, ?, ?, ?)',
-                [name, phone, jid, userId]
-              );
-              customerId = insCust.insertId;
-            } catch (dupErr) {
-              const [fallback] = await pool.execute(
-                'SELECT id FROM customers WHERE user_id = ? AND (whatsapp_jid = ? OR phone_number = ?) LIMIT 1',
-                [userId, jid, phone]
-              );
-              if (fallback.length > 0) {
-                customerId = fallback[0].id;
-                await pool.execute('UPDATE customers SET name = ? WHERE id = ?', [name, customerId]);
-              }
+          } catch (_) {}
+        } else {
+          try {
+            const [insCust] = await pool.execute(
+              'INSERT INTO customers (name, phone_number, whatsapp_jid, user_id) VALUES (?, ?, ?, ?)',
+              [name, phone, jid, userId]
+            );
+            customerId = insCust.insertId;
+          } catch (dupErr) {
+            const [fallback] = await pool.execute(
+              'SELECT id FROM customers WHERE user_id = ? AND (whatsapp_jid = ? OR phone_number = ?) LIMIT 1',
+              [userId, jid, phone]
+            );
+            if (fallback.length > 0) {
+              customerId = fallback[0].id;
+              await pool.execute('UPDATE customers SET name = ? WHERE id = ?', [name, customerId]);
             }
           }
         }
@@ -1188,29 +1394,30 @@ class WhatsAppService {
           convId = insConv.insertId;
         }
 
-        // 3. Insert last message preview if not already recorded (skip e2e_notification system messages)
-        if (chat.lastMessage) {
-          const msgText = typeof chat.lastMessage === 'string' ? chat.lastMessage : String(chat.lastMessage);
-          if (msgText !== 'End-to-end encrypted' && !msgText.includes('encryption')) {
-            const safeMsgId = chat.lastMsgId ? String(chat.lastMsgId).slice(0, 191) : null;
-            const direction = chat.fromMe ? 'outgoing' : 'incoming';
+        // 3. Insert last message preview if real text exists (skip e2e_notification system messages)
+        const msgText = (chat.lastMessage && typeof chat.lastMessage === 'string' && chat.lastMessage.trim() && chat.lastMessage.trim() !== 'Message')
+          ? chat.lastMessage.trim()
+          : null;
 
-            const [existingMsg] = await pool.execute(
-              `SELECT id FROM messages 
-               WHERE conversation_id = ? AND (whatsapp_message_id = ? OR (direction = ? AND message = ? AND created_at = ?)) 
-               LIMIT 1`,
-              [convId, safeMsgId || '', direction, msgText, isoDate]
-            );
+        if (msgText && msgText !== 'End-to-end encrypted' && !msgText.includes('encryption')) {
+          const safeMsgId = chat.lastMsgId ? String(chat.lastMsgId).slice(0, 191) : null;
+          const direction = chat.fromMe ? 'outgoing' : 'incoming';
 
-            if (existingMsg.length === 0) {
-              try {
-                await pool.execute(
-                  `INSERT INTO messages (conversation_id, customer_id, direction, message, whatsapp_message_id, message_type, status, created_at)
-                   VALUES (?, ?, ?, ?, ?, 'text', 'delivered', ?)`,
-                  [convId, customerId, direction, msgText, safeMsgId, isoDate]
-                );
-              } catch (_) { }
-            }
+          const [existingMsg] = await pool.execute(
+            `SELECT id FROM messages 
+             WHERE (conversation_id = ? OR customer_id = ?) AND (whatsapp_message_id = ? OR (direction = ? AND message = ?)) 
+             LIMIT 1`,
+            [convId, customerId, safeMsgId || '', direction, msgText]
+          );
+
+          if (existingMsg.length === 0) {
+            try {
+              await pool.execute(
+                `INSERT INTO messages (conversation_id, customer_id, direction, message, whatsapp_message_id, message_type, status, created_at, user_id)
+                 VALUES (?, ?, ?, ?, ?, 'text', 'delivered', ?, ?)`,
+                [convId, customerId, direction, msgText, safeMsgId, isoDate, userId]
+              );
+            } catch (_) { }
           }
         }
 
@@ -1274,6 +1481,52 @@ class WhatsAppService {
                   c.offerType === 'video' ||
                   (c._data && (c._data.isVideo || c._data.isVideoCall || c._data.mediaType === 'video' || c._data.offerType === 'video' || String(c._data.subtype || '').includes('video')))
                 );
+
+                let durSec = null;
+                const d = c.duration !== undefined ? c.duration : (c.webCallDuration !== undefined ? c.webCallDuration : (c._data ? c._data.duration : null));
+                if (typeof d === 'number' && !isNaN(d) && d > 0 && d < 1e8) {
+                  durSec = Math.round(d);
+                } else if (typeof d === 'string') {
+                  const m = d.match(/(\d+)/);
+                  if (m) {
+                    const p = parseInt(m[1], 10);
+                    if (p > 0) durSec = p;
+                  }
+                }
+
+                const isMissed = !!(
+                  c.isMissed ||
+                  c.callResult === 1 ||
+                  c.webCallResult === 'MISSED' ||
+                  c.webCallResult === 'UNANSWERED' ||
+                  c.webCallResult === 'NO_ANSWER'
+                );
+
+                const isRejected = !isMissed && !!(
+                  c.webCallResult === 'REJECTED' ||
+                  c.webCallResult === 'DECLINED' ||
+                  c.webCallResult === 'BUSY'
+                );
+
+                const isAnswered = !isMissed && !isRejected && (
+                  (durSec !== null && durSec > 0) ||
+                  c.webCallResult === 'CONNECTED' ||
+                  c.webCallResult === 'ACCEPTED' ||
+                  c.webCallResult === 'COMPLETED' ||
+                  c.webCallResult === 'SUCCESS'
+                );
+
+                let status = 'unknown';
+                if (isMissed) {
+                  status = 'missed';
+                  durSec = null;
+                } else if (isRejected) {
+                  status = 'rejected';
+                  durSec = null;
+                } else if (isAnswered) {
+                  status = 'answered';
+                }
+
                 const rawCallData = {
                   id: c.id?._serialized || (typeof c.id === 'string' ? c.id : null),
                   from: rawPeer,
@@ -1282,16 +1535,21 @@ class WhatsAppService {
                   isVideo: isVid,
                   isVideoCall: isVid,
                   isGroupCall: false,
-                  canHandleLocally: c.canHandleLocally !== undefined ? c.canHandleLocally : true
+                  canHandleLocally: c.canHandleLocally !== undefined ? c.canHandleLocally : true,
+                  status: status,
+                  duration: durSec
                 };
+
                 results.push({
                   callId: c.id?._serialized || (typeof c.id === 'string' ? c.id : `call_${c.t}_${Math.random()}`),
                   peerJid: rawPeer,
                   isVideo: isVid,
                   outgoing: !!c.outgoing,
-                  isMissed: !!(c.isMissed || c.callResult === 1 || c.webCallResult === 'MISSED' || c.webCallResult === 'REJECTED' || c.webCallResult === 'UNANSWERED'),
+                  isMissed: isMissed,
+                  isRejected: isRejected,
+                  status: status,
                   timestamp: c.offerTime || c.t || Math.floor(Date.now() / 1000),
-                  duration: c.duration || c.webCallDuration || null,
+                  duration: durSec,
                   rawCall: rawCallData
                 });
               }
@@ -1317,18 +1575,72 @@ class WhatsAppService {
               const isFromMe = !!(m.id?.fromMe || m.fromMe);
               const peerJid = m.id?.remote?._serialized || (typeof m.id?.remote === 'string' ? m.id.remote : '') || fallbackJid || (isFromMe ? (m.to?._serialized || m.to) : (m.from?._serialized || m.from)) || '';
               if (!peerJid || peerJid.includes('@g.us') || peerJid.includes('@newsletter') || peerJid.startsWith('group-')) return;
-              const isMissed = !!(m.subtype === 'missed' || m.callResult === 1 || m.webCallResult === 'MISSED' || m.webCallResult === 'UNANSWERED' || m.webCallResult === 'NO_ANSWER' || subTypeStr.includes('missed') || bodyStr.includes('missed') || bodyStr.includes('no answer') || bodyStr.includes('unanswered') || bodyStr.includes('declined'));
 
-              let duration = m.duration || m.callDuration || (m._data && (m._data.duration || m._data.callDuration)) || null;
-              if (!duration && (m.body || (m._data && m._data.body))) {
-                const bText = String(m.body || (m._data && m._data.body));
-                const match = bText.match(/(\d+\s*(?:sec|min|s|m|seconds|second))/i);
-                if (match) {
-                  duration = match[1];
+              const isMissed = !!(
+                m.isMissed ||
+                m.isMissedCall ||
+                (m._data && (m._data.isMissed || m._data.isMissedCall)) ||
+                m.subtype === 'missed' ||
+                (m._data && m._data.subtype === 'missed') ||
+                m.callResult === 1 ||
+                (m._data && m._data.callResult === 1) ||
+                m.webCallResult === 'MISSED' ||
+                m.webCallResult === 'UNANSWERED' ||
+                m.webCallResult === 'NO_ANSWER' ||
+                subTypeStr.includes('missed') ||
+                bodyStr.includes('missed') ||
+                bodyStr.includes('no answer')
+              );
+
+              const isRejected = !isMissed && !!(
+                m.subtype === 'rejected' ||
+                (m._data && m._data.subtype === 'rejected') ||
+                m.webCallResult === 'REJECTED' ||
+                m.webCallResult === 'DECLINED' ||
+                m.webCallResult === 'BUSY' ||
+                subTypeStr.includes('rejected') ||
+                subTypeStr.includes('declined') ||
+                bodyStr.includes('declined') ||
+                bodyStr.includes('rejected')
+              );
+
+              let durSec = null;
+              const d = m.duration !== undefined ? m.duration : (
+                m.callDuration !== undefined ? m.callDuration : (
+                  m.webCallDuration !== undefined ? m.webCallDuration : (
+                    m._data ? (m._data.duration !== undefined ? m._data.duration : m._data.callDuration) : null
+                  )
+                )
+              );
+              if (typeof d === 'number' && !isNaN(d) && d > 0 && d < 1e8) {
+                durSec = Math.round(d);
+              } else if (typeof d === 'string') {
+                const numM = d.match(/(\d+)/);
+                if (numM) {
+                  const p = parseInt(numM[1], 10);
+                  if (p > 0) durSec = p;
                 }
               }
-              if (typeof duration === 'number') {
-                duration = `${duration}s`;
+
+              const isAnswered = !isMissed && !isRejected && (
+                (durSec !== null && durSec > 0) ||
+                m.webCallResult === 'CONNECTED' ||
+                m.webCallResult === 'ACCEPTED' ||
+                m.webCallResult === 'COMPLETED' ||
+                m.webCallResult === 'SUCCESS' ||
+                m.subtype === 'completed' ||
+                (m._data && m._data.subtype === 'completed')
+              );
+
+              let status = 'unknown';
+              if (isMissed) {
+                status = 'missed';
+                durSec = null;
+              } else if (isRejected) {
+                status = 'rejected';
+                durSec = null;
+              } else if (isAnswered) {
+                status = 'answered';
               }
 
               if (peerJid) {
@@ -1354,16 +1666,20 @@ class WhatsAppService {
                   isVideo: isVidMsg,
                   isVideoCall: isVidMsg,
                   isGroupCall: false,
-                  canHandleLocally: true
+                  canHandleLocally: true,
+                  status: status,
+                  duration: durSec
                 };
                 results.push({
                   callId: msgId || `msg_call_${m.t}_${m.id?.id || Math.random()}`,
                   peerJid,
                   isVideo: isVidMsg,
                   outgoing: isFromMe,
-                  isMissed,
+                  isMissed: isMissed,
+                  isRejected: isRejected,
+                  status: status,
                   timestamp: m.t || Math.floor(Date.now() / 1000),
-                  duration: duration ? String(duration) : null,
+                  duration: durSec,
                   rawCall: rawCallMsg
                 });
               }
@@ -1452,20 +1768,19 @@ class WhatsAppService {
           }
           const isoDate = new Date(tsSeconds * 1000).toISOString().slice(0, 19).replace('T', ' ');
 
-          const cleanPhoneLookup = phoneNumber.replace(/[^0-9]/g, '');
           const baseCallId = String(callId).replace(/^msg_call_\d+_/, '');
 
           const [exist] = await pool.execute(
             `SELECT id, duration, call_type, media_type FROM whatsapp_calls 
              WHERE user_id = ? AND (
                call_id = ? OR 
-               (call_id LIKE CONCAT('%', ?, '%') AND LENGTH(?) > 10) OR
-               (REPLACE(REPLACE(phone_number, '+', ''), ' ', '') = ? AND call_type = ? AND created_at = ?)
+               (call_id LIKE CONCAT('%', ?, '%') AND LENGTH(?) >= 8)
              ) LIMIT 1`,
-            [this.userId, callId, baseCallId, baseCallId, cleanPhoneLookup, callType, isoDate]
+            [this.userId, callId, baseCallId, baseCallId]
           );
 
           const rawCallJson = c.rawCall ? JSON.stringify(c.rawCall) : null;
+          const durationVal = (c.duration !== null && c.duration !== undefined && typeof c.duration === 'number') ? String(c.duration) : null;
 
           if (exist.length > 0) {
             const updateCols = [];
@@ -1474,9 +1789,9 @@ class WhatsAppService {
               updateCols.push('account_phone = ?');
               updateVals.push(this.botPhone);
             }
-            if (c.duration && (!exist[0].duration || exist[0].duration === 'null')) {
+            if (durationVal && (!exist[0].duration || exist[0].duration === 'null')) {
               updateCols.push('duration = ?');
-              updateVals.push(String(c.duration));
+              updateVals.push(durationVal);
             }
             if (mediaType === 'video' && exist[0].media_type !== 'video') {
               updateCols.push('media_type = "video"');
@@ -1498,7 +1813,7 @@ class WhatsAppService {
             const [insertRes] = await pool.execute(
               `INSERT INTO whatsapp_calls (call_id, phone_number, customer_name, call_type, media_type, duration, raw_call, created_at, user_id, account_phone)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-              [callId, phoneNumber, customerName, callType, mediaType, c.duration ? String(c.duration) : null, rawCallJson, isoDate, this.userId, this.botPhone || null]
+              [callId, phoneNumber, customerName, callType, mediaType, durationVal, rawCallJson, isoDate, this.userId, this.botPhone || null]
             );
             if (insertRes && insertRes.insertId) {
               activeProcessedIds.push(insertRes.insertId);
@@ -1606,35 +1921,48 @@ class WhatsAppService {
 
         const mediaType = isVideo ? 'video' : 'voice';
 
-        const phoneNum = String(r.phoneNumber || '').replace(/[^0-9]/g, '');
-        const rTime = new Date(r.timestamp).getTime();
+        // Parse integer duration
+        let durationSec = null;
+        if (r.duration) {
+          const match = String(r.duration).match(/(\d+)/);
+          if (match) {
+            const parsed = parseInt(match[1], 10);
+            if (!isNaN(parsed) && parsed > 0) durationSec = parsed;
+          }
+        }
+
+        const isMissed = r.callType === 'missed' || rawCall.isMissed || rawCall.status === 'missed';
+        const isRejected = rawCall.status === 'rejected' || rawCall.isRejected;
+        let callStatus = 'unknown';
+        if (isMissed) {
+          callStatus = 'missed';
+          durationSec = null;
+        } else if (isRejected) {
+          callStatus = 'rejected';
+          durationSec = null;
+        } else if (durationSec !== null && durationSec > 0) {
+          callStatus = 'answered';
+        } else if (rawCall.status) {
+          callStatus = rawCall.status;
+        }
+
         const baseId = String(r.callId || '').replace(/^msg_call_\d+_/, '');
-
         const isDup = uniqueList.some(u => {
-          const uPhone = String(u.phoneNumber || '').replace(/[^0-9]/g, '');
-          const uTime = new Date(u.timestamp).getTime();
           const uBaseId = String(u.callId || '').replace(/^msg_call_\d+_/, '');
-
-          const sameBaseId = !!(baseId && uBaseId && (baseId === uBaseId || baseId.includes(uBaseId) || uBaseId.includes(baseId)));
-          const exactSameEvent = !!(phoneNum && uPhone && phoneNum === uPhone && r.callType === u.callType && rTime === uTime);
-          return sameBaseId || exactSameEvent;
+          return !!(baseId && uBaseId && (baseId === uBaseId || baseId.includes(uBaseId) || uBaseId.includes(baseId)));
         });
 
         if (!isDup) {
-          console.log("RAW WHATSAPP CALL:", rawCall);
-          console.log("IS VIDEO:", rawCall?.isVideo);
-          console.log("IS VIDEO CALL:", rawCall?.isVideoCall);
-          console.log("NORMALIZED MEDIA TYPE:", mediaType);
-
           uniqueList.push({
             id: String(r.id || r.callId),
             callId: r.callId,
             phoneNumber: r.phoneNumber,
             customerName: r.customerName,
-            callType: r.callType,
+            callType: r.callType === 'missed' ? 'incoming' : (r.callType || 'incoming'),
+            status: callStatus,
             mediaType: mediaType,
             timestamp: r.timestamp,
-            duration: r.duration,
+            duration: durationSec,
             isVideo: isVideo,
             isVideoCall: isVideo,
             rawCall: rawCall
@@ -1688,6 +2016,7 @@ class WhatsAppService {
       const rawNumber = String(phoneNumber).replace(/[^0-9]/g, '');
       const formattedPhone = rawNumber.startsWith('+') ? rawNumber : `+${rawNumber}`;
       const mediaLabel = mediaType === 'video' ? 'video' : 'voice';
+      const callStatus = callType === 'missed' ? 'missed' : 'unknown';
       const callMsgText = mediaLabel === 'video'
         ? (callType === 'missed' ? '📹 Missed video call' : (callType === 'outgoing' ? '📹 Outgoing video call' : '📹 Video call'))
         : (callType === 'missed' ? '📞 Missed voice call' : (callType === 'outgoing' ? '📞 Outgoing voice call' : '📞 Voice call'));
@@ -1706,10 +2035,22 @@ class WhatsAppService {
         }
       } catch (_) {}
 
+      const safeCallId = `call_manual_${Date.now()}`;
+      const rawCallJson = JSON.stringify({
+        id: safeCallId,
+        from: formattedPhone,
+        timestamp: Math.floor(Date.now() / 1000),
+        isGroup: false,
+        isVideo: mediaLabel === 'video',
+        isVideoCall: mediaLabel === 'video',
+        fromMe: callType === 'outgoing',
+        status: callStatus
+      });
+
       await pool.execute(
-        `INSERT INTO whatsapp_calls (call_id, phone_number, customer_name, call_type, media_type, created_at, user_id)
-         VALUES (?, ?, ?, ?, ?, NOW(), ?)`,
-        [`call_manual_${Date.now()}`, formattedPhone, customerName, callType, mediaLabel, this.userId]
+        `INSERT INTO whatsapp_calls (call_id, phone_number, customer_name, call_type, media_type, duration, raw_call, created_at, user_id, account_phone)
+         VALUES (?, ?, ?, ?, ?, NULL, ?, NOW(), ?, ?)`,
+        [safeCallId, formattedPhone, customerName, callType === 'missed' ? 'missed' : (callType === 'incoming' ? 'incoming' : 'outgoing'), mediaLabel, rawCallJson, this.userId, this.botPhone || null]
       );
 
       if (conversationId) {
@@ -1719,12 +2060,21 @@ class WhatsAppService {
         );
         if (convRows.length > 0) {
           const customerId = convRows[0].customer_id;
-          const utcStr = new Date().toISOString().slice(0, 19).replace('T', ' ');
-          const safeMsgId = `call_manual_${Date.now()}`;
+          const nowMs = Date.now();
+          const utcStr = new Date(nowMs).toISOString().slice(0, 19).replace('T', ' ');
+          const metadataJson = JSON.stringify({
+            isCall: true,
+            status: callStatus,
+            callType: callType === 'incoming' ? 'incoming' : 'outgoing',
+            mediaType: mediaLabel,
+            duration: null,
+            whatsappCallId: safeCallId
+          });
+
           const [insertMsg] = await pool.execute(
-            `INSERT INTO messages (conversation_id, customer_id, direction, message, whatsapp_message_id, message_type, status, created_at, user_id)
-             VALUES (?, ?, ?, ?, ?, 'text', 'delivered', ?, ?)`,
-            [conversationId, customerId, callType === 'incoming' ? 'incoming' : 'outgoing', callMsgText, safeMsgId, utcStr, this.userId]
+            `INSERT INTO messages (conversation_id, customer_id, direction, message, whatsapp_message_id, message_type, whatsapp_timestamp, status, created_at, user_id, metadata)
+             VALUES (?, ?, ?, ?, ?, 'call', ?, 'delivered', ?, ?, ?)`,
+            [conversationId, customerId, callType === 'incoming' ? 'incoming' : 'outgoing', callMsgText, safeCallId, nowMs, utcStr, this.userId, metadataJson]
           );
 
           await pool.execute(

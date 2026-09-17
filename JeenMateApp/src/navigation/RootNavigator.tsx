@@ -1,13 +1,22 @@
 import React, { useEffect } from 'react';
-import { NavigationContainer } from '@react-navigation/native';
+import { NavigationContainer, DefaultTheme } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { ActivityIndicator, View, StatusBar } from 'react-native';
 import { useAuthStore } from '../store/authStore';
 import { LoginScreen } from '../screens/auth/LoginScreen';
 import { BottomTabNavigator } from './BottomTabNavigator';
 import { ChatDetailScreen } from '../screens/chat/ChatDetailScreen';
+import { InternalChatDetailScreen } from '../screens/chat/InternalChatDetailScreen';
 import { CreateUserScreen } from '../screens/admin/CreateUserScreen';
 import { COLORS } from '../constants/theme';
+
+const navTheme = {
+  ...DefaultTheme,
+  colors: {
+    ...DefaultTheme.colors,
+    background: COLORS.bgLinen,
+  },
+};
 
 const Stack = createNativeStackNavigator();
 
@@ -35,7 +44,7 @@ export const RootNavigator: React.FC = () => {
   }
 
   return (
-    <NavigationContainer>
+    <NavigationContainer theme={navTheme}>
       <StatusBar barStyle="dark-content" />
       <Stack.Navigator
         screenOptions={{
@@ -51,6 +60,13 @@ export const RootNavigator: React.FC = () => {
             <Stack.Screen
               name="ChatDetail"
               component={ChatDetailScreen}
+              options={{
+                headerShown: false,
+              }}
+            />
+            <Stack.Screen
+              name="InternalChatDetail"
+              component={InternalChatDetailScreen}
               options={{
                 headerShown: false,
               }}

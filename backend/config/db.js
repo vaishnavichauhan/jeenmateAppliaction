@@ -44,7 +44,8 @@ async function initDb() {
         created_by_name VARCHAR(100) NULL,
         assigned_to_id INT NULL,
         assigned_by_id INT NULL,
-        assigned_by_name VARCHAR(100) NULL
+        assigned_by_name VARCHAR(100) NULL,
+        event_type ENUM('PhoneCall', 'WhatsappCall', 'WhatsappChat', 'JeenmateChat', 'Self') DEFAULT 'Self'
       );
     `);
 
@@ -56,6 +57,9 @@ async function initDb() {
     } catch (e) {}
     try {
       await connection.execute('ALTER TABLE tasks ADD COLUMN assigned_by_name VARCHAR(100) NULL');
+    } catch (e) {}
+    try {
+      await connection.execute("ALTER TABLE tasks ADD COLUMN event_type ENUM('PhoneCall', 'WhatsappCall', 'WhatsappChat', 'JeenmateChat', 'Self') DEFAULT 'Self'");
     } catch (e) {}
 
     // Create whatsapp_calls table if not exists
@@ -76,6 +80,41 @@ async function initDb() {
 
     try {
       await connection.execute('ALTER TABLE whatsapp_calls ADD COLUMN account_phone VARCHAR(30) NULL');
+    } catch (e) {}
+    try {
+      await connection.execute('ALTER TABLE whatsapp_calls ADD COLUMN raw_call TEXT NULL');
+    } catch (e) {}
+    try {
+      await connection.execute('ALTER TABLE messages ADD COLUMN metadata JSON NULL');
+    } catch (e) {}
+    try {
+      await connection.execute("ALTER TABLE messages ADD COLUMN message_type VARCHAR(50) DEFAULT 'text'");
+    } catch (e) {}
+
+    // Create internal_messages table if not exists
+    await connection.execute(`
+      CREATE TABLE IF NOT EXISTS internal_messages (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        sender_id INT NOT NULL,
+        receiver_id INT NOT NULL,
+        message_text TEXT NULL,
+        media_urls TEXT NULL,
+        message_type ENUM('text', 'image', 'media') DEFAULT 'text',
+        is_read TINYINT(1) DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_sender_receiver (sender_id, receiver_id),
+        INDEX idx_receiver_read (receiver_id, is_read)
+      );
+    `);
+
+    try {
+      await connection.execute('ALTER TABLE internal_messages ADD COLUMN media_urls TEXT NULL');
+    } catch (e) {}
+    try {
+      await connection.execute("ALTER TABLE internal_messages ADD COLUMN message_type ENUM('text', 'image', 'media') DEFAULT 'text'");
+    } catch (e) {}
+    try {
+      await connection.execute('ALTER TABLE internal_messages MODIFY COLUMN message_text TEXT NULL');
     } catch (e) {}
 
     // Verify admin user

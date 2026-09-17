@@ -19,7 +19,7 @@ import {
 } from 'react-native';
 import { useNavigation, useFocusEffect } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useChatStore, Conversation } from '../../store/chatStore';
+import { useChatStore, Conversation, sortConversations } from '../../store/chatStore';
 import { useWhatsAppStore } from '../../store/whatsappStore';
 import { useTaskStore, TeamMember } from '../../store/taskStore';
 import { useAuthStore } from '../../store/authStore';
@@ -47,11 +47,11 @@ export const ChatScreen: React.FC = () => {
   const { isConnected, fetchStatus: fetchWhatsAppStatus } = useWhatsAppStore();
 
   const [refreshing, setRefreshing] = useState(false);
-  const [visibleCount, setVisibleCount] = useState(10);
+  const [visibleCount, setVisibleCount] = useState(50);
   const [isInitialLoad, setIsInitialLoad] = useState(true);
 
   useEffect(() => {
-    setVisibleCount(10);
+    setVisibleCount(50);
   }, [searchQuery]);
 
   useEffect(() => {
@@ -73,7 +73,6 @@ export const ChatScreen: React.FC = () => {
   useFocusEffect(
     useCallback(() => {
       let isMounted = true;
-      setIsInitialLoad(true);
       Promise.all([fetchWhatsAppStatus(), fetchConversations()]).finally(() => {
         if (isMounted) {
           setIsInitialLoad(false);
@@ -88,7 +87,7 @@ export const ChatScreen: React.FC = () => {
   const onRefresh = async () => {
     setRefreshing(true);
     await Promise.all([fetchWhatsAppStatus(), fetchConversations()]);
-    setVisibleCount(10);
+    setVisibleCount(50);
     setRefreshing(false);
   };
 
@@ -110,7 +109,8 @@ export const ChatScreen: React.FC = () => {
     navigation.navigate('ChatDetail', { conversationId: conv.id, customerName: conv.customer_name });
   };
 
-  const filteredConversations = conversations.filter((c) => {
+  const sortedConversations = sortConversations(conversations);
+  const filteredConversations = sortedConversations.filter((c) => {
     if (!searchQuery.trim()) return true;
     const q = searchQuery.toLowerCase();
     return (
@@ -120,13 +120,22 @@ export const ChatScreen: React.FC = () => {
     );
   });
 
+  const parseSafeDate = (dateStr?: string) => {
+    if (!dateStr) return null;
+    const str = String(dateStr).trim();
+    if (!str || str === '2000-01-01 00:00:00' || str.startsWith('1970') || str.startsWith('2000-01-01')) return null;
+    const normalized = str.includes('T') || str.endsWith('Z')
+      ? (str.endsWith('Z') ? str : `${str}Z`)
+      : `${str.replace(' ', 'T')}Z`;
+    let d = new Date(normalized);
+    if (!isNaN(d.getTime())) return d;
+    d = new Date(str);
+    return isNaN(d.getTime()) ? null : d;
+  };
+
   const formatTimestamp = (dateStr?: string) => {
-    if (!dateStr) return '';
-    const normalized = dateStr.includes('T') || dateStr.endsWith('Z')
-      ? (dateStr.endsWith('Z') ? dateStr : `${dateStr}Z`)
-      : `${dateStr.replace(' ', 'T')}Z`;
-    const date = new Date(normalized);
-    if (isNaN(date.getTime())) return '';
+    const date = parseSafeDate(dateStr);
+    if (!date) return '';
 
     const now = new Date();
     const isToday =
@@ -152,25 +161,45 @@ export const ChatScreen: React.FC = () => {
     return date.toLocaleDateString([], { month: 'short', day: 'numeric' });
   };
 
+  const getConvDateDisplay = (dateStr?: string) => {
+    const d = parseSafeDate(dateStr);
+    if (!d) return getTodayDateStr();
+    const day = String(d.getDate()).padStart(2, '0');
+    const month = String(d.getMonth() + 1).padStart(2, '0');
+    const year = d.getFullYear();
+    return `${day}/${month}/${year}`;
+  };
+
+  const getConvTimeDisplay = (dateStr?: string) => {
+    const d = parseSafeDate(dateStr);
+    if (!d) return getCurrentTimeStr();
+    return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', hour12: true });
+  };
+
   const getCleanMessagePreview = (msg?: string) => {
-    if (!msg) return 'No messages yet';
-    if (msg.startsWith('/9j/') || (msg.length > 100 && /^[A-Za-z0-9+/=]+$/.test(msg.slice(0, 40)))) {
+    if (!msg || !String(msg).trim()) return 'No messages yet';
+    const raw = String(msg).trim();
+    if (raw === '[revoked]') return '🚫 You deleted this message';
+    if (raw.startsWith('/9j/') || (raw.length > 100 && /^[A-Za-z0-9+/=]+$/.test(raw.slice(0, 40)))) {
       return '📷 Photo';
     }
-    const lower = msg.toLowerCase();
-    if (lower.includes('video') && (lower.includes('call') || msg.includes('📹'))) {
+    const lower = raw.toLowerCase();
+    if (lower.includes('video') && (lower.includes('call') || raw.includes('📹'))) {
       return lower.includes('missed') ? 'Missed video call' : 'Video call';
     }
-    if (lower.includes('voice') || lower.includes('call') || msg === '[call_log]' || msg.includes('📞')) {
+    if (lower.includes('voice') || lower.includes('call') || raw === '[call_log]' || raw.includes('📞')) {
       return lower.includes('missed') ? 'Missed voice call' : 'Voice call';
     }
-    if (msg === 'Images' || msg === 'Image') return '🖼️ Image';
-    if (msg === 'Video') return '🎥 Video';
-    if (msg === 'Voice message') return '🎤 Voice message';
-    if (msg === '[gp2]') return 'Group update';
-    if (msg === '[e2e_notification]') return 'End-to-end encrypted';
-    if (msg === '[notification_template]') return 'Notification';
-    return msg;
+    if (raw === 'Images' || raw === 'Image' || raw === '🖼️ Image') return '📷 Photo';
+    if (raw === 'Video' || raw === '🎥 Video') return '🎥 Video';
+    if (raw === 'Voice message' || raw === '🎤 Voice Message' || raw === '🎤 Voice message') return '🎤 Voice message';
+    if (raw === 'Document' || raw === '📄 Document') return '📄 Document';
+    if (raw === 'Sticker' || raw === '🎭 Sticker') return '🏷️ Sticker';
+    if (raw === 'Location' || raw === '📍 Location') return '📍 Location';
+    if (raw === '[gp2]') return 'Group update';
+    if (raw === '[e2e_notification]') return 'End-to-end encrypted';
+    if (raw === '[notification_template]') return 'Notification';
+    return raw;
   };
 
   // CRM Task Modal
@@ -260,6 +289,7 @@ export const ChatScreen: React.FC = () => {
         staffNote: staffNote,
         dueDate: combinedDue,
         assignedToUserId: assignedUser ? assignedUser.id : null,
+        eventType: 'WhatsappChat',
       });
       setAssignedUser(null);
       setTaskModalVisible(false);
@@ -305,11 +335,6 @@ export const ChatScreen: React.FC = () => {
               <Text style={styles.customerName} numberOfLines={1}>
                 {item.customer_name}
               </Text>
-              {item.is_pinned ? (
-                <View style={{ marginLeft: 6 }}>
-                  <Icon name="pin" size={12} color={COLORS.primaryNavy} />
-                </View>
-              ) : null}
             </View>
 
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
@@ -345,7 +370,13 @@ export const ChatScreen: React.FC = () => {
       {/* Reusable Top Header */}
       <Header
         title="WhatsApp Chats"
-        onBack={() => navigation.navigate('Home')}
+        onBack={() => {
+          if (navigation.canGoBack()) {
+            navigation.goBack();
+          } else {
+            navigation.navigate('ChatSelect');
+          }
+        }}
       />
 
       {/* If WhatsApp is disconnected, don't show chat list; show "Please link your device" */}
@@ -381,7 +412,7 @@ export const ChatScreen: React.FC = () => {
               <Icon name="search" size={16} color={COLORS.textMuted} />
               <TextInput
                 style={styles.searchInput}
-                placeholder="Search by customer name, phone, message..."
+                placeholder="Search by customer name, phone..."
                 placeholderTextColor={COLORS.textSubtle}
                 value={searchQuery}
                 onChangeText={setSearchQuery}
@@ -522,10 +553,34 @@ export const ChatScreen: React.FC = () => {
                       </Text>
                     </View>
 
+                    {/* Date */}
+                    <View style={styles.infoDetailRow}>
+                      <Text style={styles.infoDetailLabel}>Date :</Text>
+                      <Text style={styles.infoDetailValue}>
+                        {getConvDateDisplay(selectedConv.last_message_at)}
+                      </Text>
+                    </View>
+
+                    {/* Time */}
+                    <View style={styles.infoDetailRow}>
+                      <Text style={styles.infoDetailLabel}>Time :</Text>
+                      <Text style={styles.infoDetailValue}>
+                        {getConvTimeDisplay(selectedConv.last_message_at)}
+                      </Text>
+                    </View>
+
                     {/* Event Type */}
-                    <View style={[styles.infoDetailRow, { borderBottomWidth: 0, paddingBottom: 0 }]}>
+                    <View style={styles.infoDetailRow}>
                       <Text style={styles.infoDetailLabel}>Event Type :</Text>
-                      <Text style={styles.infoDetailValue}>Chat</Text>
+                      <Text style={styles.infoDetailValue}>WhatsappChat</Text>
+                    </View>
+
+                    {/* Event Description */}
+                    <View style={[styles.infoDetailRow, { borderBottomWidth: 0, paddingBottom: 0 }]}>
+                      <Text style={styles.infoDetailLabel}>Event description :</Text>
+                      <Text style={styles.infoDetailDescValue} numberOfLines={2}>
+                        {getCleanMessagePreview(selectedConv.last_message) || 'WhatsApp Chat'}
+                      </Text>
                     </View>
                   </View>
                 </View>
@@ -1020,6 +1075,14 @@ const styles = StyleSheet.create({
     color: COLORS.textDark,
     flex: 0.58,
     textAlign: 'right',
+  },
+  infoDetailDescValue: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#D97706',
+    flex: 0.58,
+    textAlign: 'right',
+    fontStyle: 'italic',
   },
   dateTimeRow: {
     flexDirection: 'row',

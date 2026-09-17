@@ -31,14 +31,31 @@ export type MessageListItem =
   | { type: 'date_header'; id: string; dateLabel: string }
   | (ChatMessage & { type?: 'message' });
 
-const parseMessageDate = (dateStr?: string): Date | null => {
-  if (!dateStr) return null;
-  let str = dateStr;
-  if (!str.includes('T') && !str.endsWith('Z')) {
-    str = `${str.replace(' ', 'T')}Z`;
+const parseMessageDate = (dateVal?: string | number, waTimestamp?: number | null): Date | null => {
+  if (waTimestamp && Number(waTimestamp) > 0) {
+    const d = new Date(Number(waTimestamp));
+    if (!isNaN(d.getTime())) return d;
   }
-  const d = new Date(str);
-  return isNaN(d.getTime()) ? null : d;
+  if (!dateVal) return null;
+  if (typeof dateVal === 'number') {
+    const num = dateVal > 1e11 ? dateVal : dateVal * 1000;
+    const d = new Date(num);
+    return isNaN(d.getTime()) ? null : d;
+  }
+  const str = String(dateVal).trim();
+  if (!str || str === '2000-01-01 00:00:00' || str.startsWith('1970') || str.startsWith('2000-01-01')) return null;
+  if (/^\d{10,13}$/.test(str)) {
+    const num = Number(str);
+    const d = new Date(num > 1e11 ? num : num * 1000);
+    if (!isNaN(d.getTime())) return d;
+  }
+  const normalized = str.includes('T') || str.endsWith('Z')
+    ? (str.endsWith('Z') ? str : `${str}Z`)
+    : `${str.replace(' ', 'T')}Z`;
+  const d = new Date(normalized);
+  if (!isNaN(d.getTime())) return d;
+  const dRaw = new Date(str);
+  return isNaN(dRaw.getTime()) ? null : dRaw;
 };
 
 const getDateHeaderLabel = (date: Date): string => {
@@ -69,16 +86,23 @@ const groupMessagesByDate = (rawMessages: ChatMessage[]): MessageListItem[] => {
 
   // Sort chronologically (oldest first, newest at the bottom)
   const sorted = [...rawMessages].sort((a, b) => {
-    const timeA = parseMessageDate(a.timestamp)?.getTime() || 0;
-    const timeB = parseMessageDate(b.timestamp)?.getTime() || 0;
-    return timeA - timeB;
+    const timeA = (a.whatsapp_timestamp && Number(a.whatsapp_timestamp) > 0)
+      ? Number(a.whatsapp_timestamp)
+      : (parseMessageDate(a.timestamp, a.whatsapp_timestamp)?.getTime() || 0);
+    const timeB = (b.whatsapp_timestamp && Number(b.whatsapp_timestamp) > 0)
+      ? Number(b.whatsapp_timestamp)
+      : (parseMessageDate(b.timestamp, b.whatsapp_timestamp)?.getTime() || 0);
+    if (timeA !== timeB) return timeA - timeB;
+    const idA = typeof a.id === 'number' ? a.id : parseInt(String(a.id), 10) || 0;
+    const idB = typeof b.id === 'number' ? b.id : parseInt(String(b.id), 10) || 0;
+    return idA - idB;
   });
 
   const listItems: MessageListItem[] = [];
   let lastDateKey = '';
 
   for (const msg of sorted) {
-    const dateObj = parseMessageDate(msg.timestamp);
+    const dateObj = parseMessageDate(msg.timestamp, msg.whatsapp_timestamp);
     if (dateObj) {
       const dateKey = `${dateObj.getFullYear()}-${dateObj.getMonth()}-${dateObj.getDate()}`;
       if (dateKey !== lastDateKey) {
@@ -128,7 +152,12 @@ export const ChatDetailScreen: React.FC = () => {
   useEffect(() => {
     const showSub = Keyboard.addListener(
       Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow',
-      () => setKeyboardVisible(true)
+      () => {
+        setKeyboardVisible(true);
+        setTimeout(() => {
+          flatListRef.current?.scrollToEnd({ animated: true });
+        }, 100);
+      }
     );
     const hideSub = Keyboard.addListener(
       Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide',
@@ -146,7 +175,6 @@ export const ChatDetailScreen: React.FC = () => {
   const [taskStaffNote, setTaskStaffNote] = useState('');
   const [taskMessageDate, setTaskMessageDate] = useState('');
   const [taskMessageTime, setTaskMessageTime] = useState('');
-  const [taskEventType, setTaskEventType] = useState('WhatsApp Chat');
   const [assignDropdownOpen, setAssignDropdownOpen] = useState(false);
   const [isSubmittingTask, setIsSubmittingTask] = useState(false);
   const taskModalScrollRef = useRef<any>(null);
@@ -268,8 +296,6 @@ export const ChatDetailScreen: React.FC = () => {
       setTaskMessageDate(getTodayDateStr());
       setTaskMessageTime(getCurrentTimeStr());
     }
-
-    setTaskEventType(eventType || (messageText?.toLowerCase().includes('call') ? 'Call' : 'WhatsApp Chat'));
     setTaskModalVisible(true);
   };
 
@@ -280,7 +306,6 @@ export const ChatDetailScreen: React.FC = () => {
       const custName = customerName || activeConversation?.customer_name || 'Customer';
       const custPhone = activeConversation?.phone_number || '+910000000000';
       const combinedDue = taskTime?.trim() ? `${taskDueDate.trim()} ${taskTime.trim()}` : taskDueDate.trim();
-
       await addTask({
         customerId: conversationId,
         customerName: custName,
@@ -289,6 +314,7 @@ export const ChatDetailScreen: React.FC = () => {
         staffNote: taskStaffNote,
         dueDate: combinedDue,
         assignedToUserId: assignedUser ? assignedUser.id : null,
+        eventType: 'WhatsappChat',
       });
 
       setAssignedUser(null);
@@ -302,11 +328,24 @@ export const ChatDetailScreen: React.FC = () => {
     }
   };
 
-  const formatTime = (isoString?: string) => {
-    if (!isoString) return '';
-    const date = parseMessageDate(isoString);
+  const formatTime = (isoString?: string, waTimestamp?: number | null) => {
+    if (!isoString && !waTimestamp) return '';
+    const date = parseMessageDate(isoString, waTimestamp);
     if (!date) return '';
     return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', hour12: true });
+  };
+
+  const formatCallDuration = (seconds?: number | null): string => {
+    if (seconds === null || seconds === undefined || isNaN(seconds) || seconds <= 0) {
+      return '';
+    }
+    const s = Math.round(seconds);
+    if (s < 60) {
+      return `${s}s`;
+    }
+    const mins = Math.floor(s / 60);
+    const remSecs = s % 60;
+    return `${mins}:${remSecs.toString().padStart(2, '0')}`;
   };
 
   const getCallInfo = (rawText: string) => {
@@ -355,6 +394,82 @@ export const ChatDetailScreen: React.FC = () => {
     }
 
     return { isCall: true, isVideo: isVideoCall, isMissed, title, subtitle };
+  };
+
+  const getStructuredCallInfo = (item: ChatMessage) => {
+    const metadata = item.metadata;
+    const isStaff = item.sender === 'staff';
+    const rawText = item.text || (item as any).message || '';
+
+    // Priority 1: Structured metadata from API
+    if (metadata && metadata.isCall) {
+      const isVideo = metadata.mediaType === 'video';
+      const isMissed = metadata.status === 'missed';
+      const isRejected = metadata.status === 'rejected';
+      const isAnswered = metadata.status === 'answered';
+      const isUnknown = metadata.status === 'unknown';
+      const isOutgoing = metadata.callType === 'outgoing' || isStaff;
+
+      let title = '';
+      if (isVideo) {
+        if (isMissed) title = 'Missed video call';
+        else if (isRejected) title = 'Declined video call';
+        else if (isOutgoing) title = 'Outgoing video call';
+        else if (isUnknown) title = 'Incoming video call';
+        else title = 'Video call';
+      } else {
+        if (isMissed) title = 'Missed voice call';
+        else if (isRejected) title = 'Declined voice call';
+        else if (isOutgoing) title = 'Outgoing voice call';
+        else if (isUnknown) title = 'Incoming voice call';
+        else title = 'Voice call';
+      }
+
+      let subtitle = '';
+      if (isMissed) {
+        subtitle = 'No answer';
+      } else if (isRejected) {
+        subtitle = 'Declined';
+      } else if (isUnknown) {
+        subtitle = isOutgoing ? 'Outgoing' : 'Ringing';
+      } else if (metadata.duration !== null && metadata.duration !== undefined && metadata.duration > 0) {
+        subtitle = formatCallDuration(metadata.duration);
+      }
+
+      return {
+        isCall: true,
+        isVideo,
+        isMissed,
+        isRejected,
+        isAnswered,
+        isUnknown,
+        title,
+        subtitle,
+        duration: metadata.duration
+      };
+    }
+
+    // Priority 2: message_type === 'call'
+    if (item.message_type === 'call') {
+      const fallback = getCallInfo(rawText);
+      return {
+        ...fallback,
+        isRejected: false,
+        isAnswered: !fallback.isMissed,
+        isUnknown: false,
+        duration: null
+      };
+    }
+
+    // Priority 3: Legacy getCallInfo fallback for old messages without metadata
+    const legacy = getCallInfo(rawText);
+    return {
+      ...legacy,
+      isRejected: false,
+      isAnswered: legacy.isCall && !legacy.isMissed,
+      isUnknown: false,
+      duration: null
+    };
   };
 
   const handleDirectCall = (type: 'voice' | 'video') => {
@@ -452,7 +567,7 @@ export const ChatDetailScreen: React.FC = () => {
     const rawText = item.text || (item as any).message || '';
     const { senderName, contentText } = !isStaff ? parseGroupSender(rawText) : { senderName: null, contentText: rawText };
     const displaySenderName = senderName || customerName || activeConversation?.customer_name || 'Customer';
-    const callInfo = getCallInfo(contentText);
+    const callInfo = getStructuredCallInfo(item);
 
     if (callInfo.isCall) {
       return (
@@ -530,7 +645,7 @@ export const ChatDetailScreen: React.FC = () => {
 
             <View style={styles.bubbleMeta}>
               <Text style={[styles.bubbleTime, isStaff ? styles.timeStaff : styles.timeCustomer]}>
-                {formatTime(item.timestamp)}
+                {formatTime(item.timestamp, item.whatsapp_timestamp)}
               </Text>
               {isStaff ? (
                 <View style={styles.checkmarkIcon}>
@@ -586,7 +701,7 @@ export const ChatDetailScreen: React.FC = () => {
 
           <View style={styles.bubbleMeta}>
             <Text style={[styles.bubbleTime, isStaff ? styles.timeStaff : styles.timeCustomer]}>
-              {formatTime(item.timestamp)}
+              {formatTime(item.timestamp, item.whatsapp_timestamp)}
             </Text>
             {isStaff ? (
               <View style={styles.checkmarkIcon}>
@@ -609,7 +724,7 @@ export const ChatDetailScreen: React.FC = () => {
   return (
     <KeyboardAvoidingView
       style={styles.container}
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
       keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 0}
     >
       <StatusBar barStyle="light-content" />
@@ -662,6 +777,8 @@ export const ChatDetailScreen: React.FC = () => {
           bounces={true}
           alwaysBounceVertical={true}
           overScrollMode="always"
+          keyboardDismissMode="on-drag"
+          keyboardShouldPersistTaps="handled"
           maintainVisibleContentPosition={{ minIndexForVisible: 1 }}
           refreshControl={
             <RefreshControl
@@ -711,7 +828,7 @@ export const ChatDetailScreen: React.FC = () => {
       >
         <TextInput
           style={styles.textInput}
-          placeholder="Type WhatsApp reply to customer..."
+          placeholder="Type Here..."
           placeholderTextColor={COLORS.textSubtle}
           value={inputMessage}
           onChangeText={setInputMessage}
@@ -826,9 +943,7 @@ export const ChatDetailScreen: React.FC = () => {
                   {/* Event Type */}
                   <View style={styles.infoDetailRow}>
                     <Text style={styles.infoDetailLabel}>Event Type :</Text>
-                    <Text style={styles.infoDetailValue}>
-                      {taskEventType || 'WhatsApp Chat'}
-                    </Text>
+                    <Text style={styles.infoDetailValue}>WhatsappChat</Text>
                   </View>
 
                   {/* Message / Description */}
@@ -1220,11 +1335,12 @@ const styles = StyleSheet.create({
   textInput: {
     flex: 1,
     minHeight: 40,
-    maxHeight: 100,
     backgroundColor: COLORS.inputBg,
-    borderRadius: RADIUS.md,
-    paddingHorizontal: 14,
-    paddingVertical: 8,
+    borderRadius: 20,
+    paddingHorizontal: SPACING.md,
+    paddingTop: 10,
+    paddingBottom: 10,
+    maxHeight: 100,
     fontSize: 14,
     color: COLORS.textDark,
     borderWidth: 1,

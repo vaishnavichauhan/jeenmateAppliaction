@@ -24,15 +24,28 @@ async function createTask(req, res, next) {
   try {
     const {
       customerId,
+      customer_id,
       customerName,
+      customer_name,
       customerPhone,
+      customer_phone,
       originalMessage,
+      original_message,
       staffNote,
+      staff_note,
       dueDate,
-      assignedToUserId
+      due_date,
+      assignedToUserId,
+      assigned_to_id,
+      assigned_to_user_id,
+      eventType,
+      event_type
     } = req.body;
 
-    if (!customerName || !customerPhone) {
+    const name = (customerName || customer_name || '').trim();
+    const phone = (customerPhone || customer_phone || '').trim();
+
+    if (!name || !phone) {
       return res.status(400).json({
         success: false,
         message: 'Customer name and customer phone are required.'
@@ -42,17 +55,24 @@ async function createTask(req, res, next) {
     const taskId = `task_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`;
     const userId = req.user?.id;
 
+    // Supported event types: PhoneCall, WhatsappCall, WhatsappChat, JeenmateChat, Self
+    const validEventTypes = ['PhoneCall', 'WhatsappCall', 'WhatsappChat', 'JeenmateChat', 'Self'];
+    const chosenType = eventType || event_type || 'Self';
+    const finalEventType = validEventTypes.includes(chosenType) ? chosenType : 'Self';
+    const finalAssignedTo = assignedToUserId || assigned_to_id || assigned_to_user_id || null;
+
     const createdTask = await Task.create({
       id: taskId,
-      customerId: customerId || null,
-      customerName: customerName.trim(),
-      customerPhone: customerPhone.trim(),
-      originalMessage: originalMessage || '',
-      staffNote: staffNote || '',
-      dueDate: dueDate || new Date(Date.now() + 24 * 3600 * 1000).toISOString().split('T')[0],
+      customerId: customerId || customer_id || null,
+      customerName: name,
+      customerPhone: phone,
+      originalMessage: originalMessage || original_message || '',
+      staffNote: staffNote || staff_note || '',
+      dueDate: dueDate || due_date || new Date(Date.now() + 24 * 3600 * 1000).toISOString().split('T')[0],
       userId,
       createdByName: req.user?.name || 'Staff',
-      assignedToUserId: assignedToUserId ? Number(assignedToUserId) : null
+      assignedToUserId: finalAssignedTo ? Number(finalAssignedTo) : null,
+      eventType: finalEventType
     });
 
     return res.status(201).json({
