@@ -38,6 +38,14 @@ async function login(req, res, next) {
       { expiresIn: '30d' }
     );
 
+    // Auto-resume user's attached WhatsApp session in background
+    try {
+      const sessionManager = require('../services/sessionManager');
+      sessionManager.getOrCreateSession(user.id).catch((err) => {
+        console.log(`[Auth] WhatsApp session init notice for user ${user.id}:`, err.message);
+      });
+    } catch (_) {}
+
     return res.status(200).json({
       success: true,
       message: 'Login successful',
@@ -116,13 +124,11 @@ async function logout(req, res, next) {
   try {
     const userId = req.user && req.user.id;
     if (userId) {
-      console.log(`[Auth] Logging out user ${userId} (${req.user.email}). Expiring WhatsApp session...`);
-      const sessionManager = require('../services/sessionManager');
-      await sessionManager.destroySession(userId);
+      console.log(`[Auth] Logging out user ${userId} (${req.user.email}). WhatsApp session stays attached on server.`);
     }
     return res.status(200).json({
       success: true,
-      message: 'Logged out successfully. WhatsApp session expired.'
+      message: 'Logged out successfully.'
     });
   } catch (err) {
     next(err);

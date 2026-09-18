@@ -82,11 +82,14 @@ export const BottomTabNavigator: React.FC = () => {
         component={ChatStackNavigator}
         listeners={({ navigation }) => ({
           tabPress: () => {
-            navigation.navigate('Chat', { screen: 'ChatSelect' });
+            if (navigation.isFocused()) {
+              navigation.navigate('Chat', { screen: 'ChatSelect' });
+            }
           },
         })}
         options={{
           tabBarLabel: 'Chat',
+          popToTopOnBlur: true,
           tabBarIcon: ({ color, focused }) => (
             <Icon name="chat" size={22} color={color} strokeWidth={focused ? 2.5 : 1.8} />
           ),

@@ -43,7 +43,7 @@ export const SettingsScreen: React.FC = () => {
   const handleLogout = () => {
     Alert.alert(
       'Confirm Sign Out',
-      'Are you sure you want to log out of your jeenMate staff session?',
+      'Are you sure you want to log out?',
       [
         { text: 'Cancel', style: 'cancel' },
         {

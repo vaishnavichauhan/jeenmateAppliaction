@@ -15,6 +15,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useAuthStore } from '../../store/authStore';
 import { COLORS, SPACING, RADIUS } from '../../constants/theme';
 import { Icon } from '../../components/common/Icon';
+import { Header } from '../../components/common/Header';
 
 type RoleOption = 'admin' | 'user';
 
@@ -79,18 +80,12 @@ export const CreateUserScreen: React.FC<{ navigation: any }> = ({ navigation }) 
     >
       <View style={[styles.container]}>
         {/* Header */}
-        <View style={[styles.header, { paddingTop: Math.max(insets.top, 20) + 12 }]}>
-          <TouchableOpacity style={styles.backBtn} onPress={() => navigation.goBack()} activeOpacity={0.7}>
-            <Icon name="arrow-left" size={20} color={COLORS.primaryNavy} />
-          </TouchableOpacity>
-          <View style={{ flex: 1 }}>
-            <Text style={styles.headerTitle}>Create User</Text>
-            <Text style={styles.headerSub}>Add a new team member</Text>
-          </View>
-          <View style={styles.headerBadge}>
-            <Icon name="user-plus" size={16} color={COLORS.primary} />
-          </View>
-        </View>
+        <Header
+          title="Create User"
+          subtitle="Add a new team member"
+          showBack={true}
+          onBack={() => navigation.goBack()}
+        />
 
         <ScrollView
           contentContainerStyle={[styles.scrollContent, { paddingBottom: insets.bottom + 40 }]}
@@ -213,42 +208,6 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: COLORS.bgLinen,
-  },
-  header: {
-    backgroundColor: COLORS.bgWhite,
-    paddingHorizontal: SPACING.lg,
-    paddingBottom: SPACING.md,
-    flexDirection: 'row',
-    alignItems: 'center',
-    borderBottomWidth: 1,
-    borderBottomColor: COLORS.borderColor,
-    gap: 12,
-  },
-  backBtn: {
-    width: 38,
-    height: 38,
-    borderRadius: RADIUS.md,
-    backgroundColor: COLORS.bgLinen,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  headerTitle: {
-    fontSize: 20,
-    fontWeight: '800',
-    color: COLORS.primaryNavy,
-  },
-  headerSub: {
-    fontSize: 12,
-    color: COLORS.textMuted,
-    marginTop: 1,
-  },
-  headerBadge: {
-    width: 38,
-    height: 38,
-    borderRadius: RADIUS.md,
-    backgroundColor: 'rgba(26, 59, 113, 0.08)',
-    alignItems: 'center',
-    justifyContent: 'center',
   },
   scrollContent: {
     padding: SPACING.lg,

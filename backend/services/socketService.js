@@ -117,6 +117,11 @@ function broadcastWhatsAppQR(qrData) {
   ioInstance.emit('whatsapp_qr', qrData);
 }
 
+function broadcastWhatsAppSyncStatus(syncData) {
+  if (!ioInstance) return;
+  ioInstance.emit('whatsapp_sync_status', syncData);
+}
+
 module.exports = {
   initSocket,
   getIO,
@@ -124,6 +129,7 @@ module.exports = {
   broadcastConversationUpdate,
   broadcastWhatsAppStatus,
   broadcastWhatsAppQR,
+  broadcastWhatsAppSyncStatus,
   broadcastInternalMessage,
   getInternalRoom
 };

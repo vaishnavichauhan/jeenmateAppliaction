@@ -67,7 +67,7 @@ const Message = {
             metadata,
             created_at
           FROM messages
-          WHERE (conversation_id = ? OR customer_id = (SELECT customer_id FROM conversations WHERE id = ? LIMIT 1))
+          WHERE conversation_id = ?
             AND (
               (${beforeEpoch} > 0 AND whatsapp_timestamp IS NOT NULL AND whatsapp_timestamp < ${beforeEpoch})
               OR (whatsapp_timestamp IS NULL AND created_at < ?)
@@ -76,7 +76,7 @@ const Message = {
           LIMIT ${parsedLimit}
         ) sub
         ORDER BY COALESCE(whatsapp_timestamp, UNIX_TIMESTAMP(created_at) * 1000) ASC, id ASC`,
-        [conversationId, conversationId, safeBefore]
+        [conversationId, safeBefore]
       );
 
       let hasMore = false;
@@ -85,12 +85,12 @@ const Message = {
         const oldestCreated = rows[0].created_at;
         const [olderCount] = await pool.execute(
           `SELECT COUNT(*) as cnt FROM messages 
-           WHERE (conversation_id = ? OR customer_id = (SELECT customer_id FROM conversations WHERE id = ? LIMIT 1)) 
+           WHERE conversation_id = ? 
              AND (
                (? IS NOT NULL AND whatsapp_timestamp < ?)
                OR (whatsapp_timestamp IS NULL AND created_at < ?)
              )`,
-          [conversationId, conversationId, oldestWaTime, oldestWaTime, oldestCreated]
+          [conversationId, oldestWaTime, oldestWaTime, oldestCreated]
         );
         hasMore = (olderCount[0]?.cnt || 0) > 0;
       }
@@ -118,12 +118,12 @@ const Message = {
           metadata,
           created_at
         FROM messages
-        WHERE (conversation_id = ? OR customer_id = (SELECT customer_id FROM conversations WHERE id = ? LIMIT 1))
+        WHERE conversation_id = ?
         ORDER BY COALESCE(whatsapp_timestamp, UNIX_TIMESTAMP(created_at) * 1000) DESC, id DESC
         LIMIT ${parsedLimit}
       ) sub
       ORDER BY COALESCE(whatsapp_timestamp, UNIX_TIMESTAMP(created_at) * 1000) ASC, id ASC`,
-      [conversationId, conversationId]
+      [conversationId]
     );
 
     let hasMore = false;
@@ -132,12 +132,12 @@ const Message = {
       const oldestCreated = rows[0].created_at;
       const [olderCount] = await pool.execute(
         `SELECT COUNT(*) as cnt FROM messages 
-         WHERE (conversation_id = ? OR customer_id = (SELECT customer_id FROM conversations WHERE id = ? LIMIT 1)) 
+         WHERE conversation_id = ? 
            AND (
              (? IS NOT NULL AND whatsapp_timestamp < ?)
              OR (whatsapp_timestamp IS NULL AND created_at < ?)
            )`,
-        [conversationId, conversationId, oldestWaTime, oldestWaTime, oldestCreated]
+        [conversationId, oldestWaTime, oldestWaTime, oldestCreated]
       );
       hasMore = (olderCount[0]?.cnt || 0) > 0;
     }

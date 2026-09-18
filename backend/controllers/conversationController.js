@@ -26,7 +26,8 @@ async function getMessages(req, res, next) {
     const { id } = req.params;
     const { limit = 30, before, mode } = req.query;
 
-    const conversation = await Conversation.findById(id);
+    const userId = req.user ? req.user.id : null;
+    const conversation = await Conversation.findById(id, userId);
     if (!conversation) {
       return res.status(404).json({
         success: false,
@@ -40,7 +41,7 @@ async function getMessages(req, res, next) {
     // Sync latest messages for this conversation from WhatsApp Web if available
     const [custRows] = await pool.execute('SELECT id, whatsapp_jid, phone_number FROM customers WHERE id = ?', [conversation.customer_id]);
     const targetJid = custRows[0]?.whatsapp_jid || (custRows[0]?.phone_number ? `${custRows[0].phone_number.replace(/[^0-9]/g, '')}@c.us` : null);
-    const userSession = sessionManager.getSession(req.user?.id);
+    const userSession = sessionManager.getSession(userId);
     if (custRows.length > 0 && targetJid && userSession && userSession.client && userSession.client.pupPage) {
       try {
         const fetchLimit = before ? 100 : 60;
@@ -78,13 +79,13 @@ async function getMessages(req, res, next) {
               if (waCallId) {
                 const [existByCallId] = await pool.execute(
                   `SELECT id, whatsapp_message_id, message, message_type, metadata FROM messages 
-                   WHERE (conversation_id = ? OR customer_id = ?) AND (
+                   WHERE conversation_id = ? AND user_id = ? AND (
                      whatsapp_message_id = ? OR 
                      JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.whatsappCallId')) = ? OR
                      (LENGTH(?) >= 8 AND (whatsapp_message_id LIKE CONCAT('%', ?, '%') OR JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.whatsappCallId')) LIKE CONCAT('%', ?, '%')))
                    ) 
                    LIMIT 1`,
-                  [id, conversation.customer_id, waCallId, waCallId, coreCallId || '', coreCallId || '', coreCallId || '']
+                  [id, userId, waCallId, waCallId, coreCallId || '', coreCallId || '', coreCallId || '']
                 );
                 if (existByCallId.length > 0) {
                   existingMsg = existByCallId[0];
@@ -95,9 +96,9 @@ async function getMessages(req, res, next) {
               if (!existingMsg && waMs && waMs > 0) {
                 const [existByExactEpoch] = await pool.execute(
                   `SELECT id, whatsapp_message_id, message, message_type, metadata FROM messages 
-                   WHERE (conversation_id = ? OR customer_id = ?) AND direction = ? AND message_type = 'call' AND whatsapp_timestamp = ?
+                   WHERE conversation_id = ? AND user_id = ? AND direction = ? AND message_type = 'call' AND whatsapp_timestamp = ?
                    LIMIT 1`,
-                  [id, conversation.customer_id, dir, waMs]
+                  [id, userId, dir, waMs]
                 );
                 if (existByExactEpoch.length > 0) {
                   existingMsg = existByExactEpoch[0];
@@ -116,15 +117,36 @@ async function getMessages(req, res, next) {
                 await pool.execute(
                   `INSERT INTO messages (conversation_id, customer_id, direction, message, whatsapp_message_id, message_type, whatsapp_timestamp, status, created_at, user_id, metadata)
                    VALUES (?, ?, ?, ?, ?, 'call', ?, ?, ?, ?, ?)`,
-                  [id, conversation.customer_id, dir, safeBody, safeMsgId, waMs, m.status || 'delivered', iso, req.user?.id || 1, metadataJson]
+                  [id, conversation.customer_id, dir, safeBody, safeMsgId, waMs, m.status || 'delivered', iso, userId, metadataJson]
                 );
                 insertedCount++;
               }
 
-              // Also ensure whatsapp_calls table is updated with authoritative duration and status
+              // Also record in whatsapp_calls table for the Calls tab
               try {
-                const durationVal = (callMetadata.duration !== null && callMetadata.duration !== undefined) ? String(callMetadata.duration) : null;
-                const dbCallType = callMetadata.status === 'missed' ? 'missed' : dir;
+                const dbCallType = callMetadata.status === 'missed' ? 'missed' : (callMetadata.callType || 'incoming');
+                const durationVal = callMetadata.duration ? `${callMetadata.duration}s` : (m.duration ? `${m.duration}s` : null);
+                await pool.execute(
+                  `INSERT INTO whatsapp_calls (call_id, phone_number, customer_name, call_type, media_type, duration, user_id, created_at, raw_call)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON DUPLICATE KEY UPDATE 
+                     customer_name = VALUES(customer_name),
+                     call_type = VALUES(call_type),
+                     media_type = VALUES(media_type),
+                     duration = COALESCE(VALUES(duration), duration),
+                     raw_call = VALUES(raw_call)`,
+                  [
+                    waCallId,
+                    customerPhone || targetJid.split('@')[0],
+                    conversation.customer_name || 'Customer',
+                    dbCallType,
+                    callMetadata.mediaType || 'voice',
+                    durationVal,
+                    userId,
+                    iso,
+                    JSON.stringify(m.rawCall || callMetadata)
+                  ]
+                );
                 await pool.execute(
                   `UPDATE whatsapp_calls 
                    SET call_type = ?, media_type = ?, duration = COALESCE(?, duration)
@@ -132,21 +154,54 @@ async function getMessages(req, res, next) {
                      call_id = ? OR 
                      (LENGTH(?) >= 8 AND call_id LIKE CONCAT('%', ?, '%'))
                    )`,
-                  [dbCallType, callMetadata.mediaType || 'voice', durationVal, req.user?.id || 1, waCallId, coreCallId || '', coreCallId || '']
+                  [dbCallType, callMetadata.mediaType || 'voice', durationVal, userId, waCallId, coreCallId || '', coreCallId || '']
                 );
               } catch (_) {}
 
             } else {
-              // Normal message sync logic
-              const [exist] = await pool.execute(
-                `SELECT id, whatsapp_message_id, message FROM messages 
-                 WHERE (conversation_id = ? OR customer_id = ?) AND (
-                   (whatsapp_message_id IS NOT NULL AND whatsapp_message_id = ?) OR 
-                   (direction = ? AND ABS(TIMESTAMPDIFF(SECOND, created_at, ?)) <= 5)
-                 ) 
-                 LIMIT 1`,
-                [id, conversation.customer_id, safeMsgId, dir, iso]
-              );
+              // Normal message sync logic - match strictly by user_id + conversation_id + whatsapp_message_id
+              let exist = [];
+              const coreMsgId = (safeMsgId && safeMsgId.includes('_')) ? safeMsgId.split('_').pop() : safeMsgId;
+
+              if (safeMsgId) {
+                [exist] = await pool.execute(
+                  `SELECT id, whatsapp_message_id, message FROM messages 
+                   WHERE user_id = ? AND conversation_id = ? AND (
+                     whatsapp_message_id = ? OR 
+                     whatsapp_message_id = ? OR 
+                     (LENGTH(?) >= 8 AND whatsapp_message_id LIKE CONCAT('%', ?, '%'))
+                   )
+                   LIMIT 1`,
+                  [userId, id, safeMsgId, coreMsgId || '', coreMsgId || '', coreMsgId || '']
+                );
+              }
+
+              // If not matched by ID, check for pending outgoing staff message with matching text sent within 10 mins
+              if (exist.length === 0 && dir === 'outgoing' && safeBody) {
+                const tenMinsAgoMs = waMs - (10 * 60 * 1000);
+                const tenMinsAfterMs = waMs + (10 * 60 * 1000);
+                [exist] = await pool.execute(
+                  `SELECT id, whatsapp_message_id, message FROM messages 
+                   WHERE user_id = ? AND conversation_id = ? AND direction = 'outgoing' AND message = ?
+                     AND (
+                       (whatsapp_timestamp IS NOT NULL AND whatsapp_timestamp BETWEEN ? AND ?)
+                       OR (whatsapp_message_id IS NULL AND created_at >= (NOW() - INTERVAL 10 MINUTE))
+                     )
+                   ORDER BY id DESC LIMIT 1`,
+                  [userId, id, safeBody, tenMinsAgoMs, tenMinsAfterMs]
+                );
+              }
+
+              // Fallback for incoming messages: match by exact timestamp and body
+              if (exist.length === 0 && dir === 'incoming' && waMs && waMs > 0 && safeBody) {
+                [exist] = await pool.execute(
+                  `SELECT id, whatsapp_message_id, message FROM messages 
+                   WHERE user_id = ? AND conversation_id = ? AND direction = 'incoming' AND whatsapp_timestamp = ? AND message = ?
+                   LIMIT 1`,
+                  [userId, id, waMs, safeBody]
+                );
+              }
+
               if (exist.length > 0) {
                 const existingMsg = exist[0];
                 let changed = false;
@@ -167,22 +222,14 @@ async function getMessages(req, res, next) {
                 await pool.execute(
                   `INSERT INTO messages (conversation_id, customer_id, direction, message, whatsapp_message_id, message_type, whatsapp_timestamp, status, created_at, user_id, metadata)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
-                  [id, conversation.customer_id, dir, safeBody, safeMsgId, m.type || 'text', waMs, m.status || 'delivered', iso, req.user?.id || 1]
+                  [id, conversation.customer_id, dir, safeBody, safeMsgId, m.type || 'text', waMs, m.status || 'delivered', iso, userId]
                 );
                 insertedCount++;
               }
             }
           }
 
-          console.log(`[WHATSAPP SYNC]
-userId: ${req.user?.id || 1}
-chatId: ${targetJid}
-messagesReceived: ${liveMsgs.length}
-messagesInserted: ${insertedCount}
-messagesUpdated: ${updatedCount}
-duplicates: ${duplicateCount}
-oldest: ${liveMsgs[0]?.timestamp ? new Date(liveMsgs[0].timestamp * 1000).toISOString() : 'N/A'}
-newest: ${liveMsgs[liveMsgs.length - 1]?.timestamp ? new Date(liveMsgs[liveMsgs.length - 1].timestamp * 1000).toISOString() : 'N/A'}`);
+          console.log(`[Sync:User ${userId}] Chat: ${targetJid} | Conv: ${id} | Fetched: ${liveMsgs.length} | Inserted: ${insertedCount} | Updated: ${updatedCount} | Dups: ${duplicateCount}`);
         }
       } catch (liveErr) {
         console.warn('[Conversation] Live messages sync warning:', liveErr.message);
@@ -192,12 +239,12 @@ newest: ${liveMsgs[liveMsgs.length - 1]?.timestamp ? new Date(liveMsgs[liveMsgs.
     // Link any customer messages to this conversation
     if (conversation.customer_id) {
       await pool.execute(
-        'UPDATE messages SET conversation_id = ? WHERE customer_id = ? AND (conversation_id IS NULL OR conversation_id = 0)',
-        [id, conversation.customer_id]
+        'UPDATE messages SET conversation_id = ? WHERE user_id = ? AND customer_id = ? AND (conversation_id IS NULL OR conversation_id = 0)',
+        [id, userId, conversation.customer_id]
       );
       await pool.execute(
-        'UPDATE conversations SET last_message_at = (SELECT MAX(created_at) FROM messages WHERE conversation_id = ? OR customer_id = ?) WHERE id = ?',
-        [id, conversation.customer_id, id]
+        'UPDATE conversations SET last_message_at = (SELECT MAX(created_at) FROM messages WHERE conversation_id = ?) WHERE id = ? AND user_id = ?',
+        [id, id, userId]
       );
     }
 
@@ -242,27 +289,29 @@ async function sendMessage(req, res, next) {
     }
 
     // 1. Save staff reply to database first
+    const userId = req.user ? req.user.id : null;
     const savedMessage = await Message.create({
       conversationId: id,
       customerId: conversation.customer_id,
       sender: 'staff',
       text: text.trim(),
-      status: 'sent'
+      status: 'sent',
+      userId: userId
     });
 
-    const updatedConversation = await Conversation.findById(id);
+    const updatedConversation = await Conversation.findById(id, userId);
 
     // 2. Emit live Socket.IO events to connected clients
     socketService.broadcastNewMessage(id, savedMessage);
     socketService.broadcastConversationUpdate(updatedConversation);
 
     // 3. Send ONCE via WhatsApp Web client if connected for this user
-    const userSession = sessionManager.getSession(req.user?.id);
+    const userSession = sessionManager.getSession(userId);
     if (userSession && userSession.isConnected) {
       userSession.sendMessage(conversation.phone_number, text.trim())
-        .then((waResult) => {
+        .then(async (waResult) => {
           if (waResult && waResult.success && waResult.messageId) {
-            pool.execute('UPDATE messages SET whatsapp_message_id = ? WHERE id = ?', [waResult.messageId, savedMessage.id]);
+            await pool.execute('UPDATE messages SET whatsapp_message_id = ? WHERE id = ?', [waResult.messageId, savedMessage.id]);
           }
         })
         .catch((err) => {

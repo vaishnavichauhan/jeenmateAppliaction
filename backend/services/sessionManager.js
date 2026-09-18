@@ -48,21 +48,29 @@ class WhatsAppSessionManager {
    * Destroy and remove a user's session completely.
    * Called on logout — deletes Chrome instance AND session folder (forces re-scan on next login).
    */
-  async destroySession(userId) {
+  async destroySession(userId, clean = true) {
     const service = this.sessions.get(userId);
     if (service) {
       try {
-        await service.destroy();
+        await service.destroy(clean);
       } catch (e) {
         console.warn(`[SessionManager] Destroy error for user ${userId}:`, e.message);
       }
       this.sessions.delete(userId);
+    } else if (clean) {
+      try {
+        const pool = require('../config/db');
+        await pool.execute(
+          `DELETE FROM messages 
+           WHERE user_id = ? 
+              OR conversation_id IN (SELECT id FROM (SELECT id FROM conversations WHERE user_id = ?) AS c_temp)`,
+          [userId, userId]
+        );
+        await pool.execute('DELETE FROM conversations WHERE user_id = ?', [userId]);
+        await pool.execute('DELETE FROM whatsapp_calls WHERE user_id = ?', [userId]);
+        await pool.execute('DELETE FROM customers WHERE user_id = ?', [userId]);
+      } catch (_) {}
     }
-
-    try {
-      const pool = require('../config/db');
-      await pool.execute('DELETE FROM whatsapp_calls WHERE user_id = ?', [userId]);
-    } catch (_) {}
 
     // Always ensure the session folder on disk is completely erased on logout
     const sessionFolder = path.join(config.WHATSAPP_SESSION_PATH, `session-user-${userId}`);

@@ -131,8 +131,29 @@ export const useTaskStore = create<TaskState>((set, get) => ({
   },
 
   fetchTasks: async () => {
+    // 1. If tasks is empty, load from cache immediately so UI has data and doesn't flicker
+    if (get().tasks.length === 0) {
+      try {
+        const cached = await AsyncStorage.getItem(STORAGE_KEY_TASKS);
+        if (cached) {
+          const cachedTasks: CRMTask[] = JSON.parse(cached).filter((t: any) => !t.id?.startsWith('task_demo_'));
+          if (cachedTasks.length > 0 && get().tasks.length === 0) {
+            set({
+              tasks: cachedTasks,
+              counts: computeCounts(cachedTasks),
+            });
+          }
+        }
+      } catch (e) {}
+    }
+
+    const isInitial = get().tasks.length === 0;
     try {
-      set({ isRefreshing: true });
+      if (isInitial) {
+        set({ isLoading: true });
+      } else {
+        set({ isRefreshing: true });
+      }
       const res = await apiClient.get('/api/tasks');
       if (res.data && res.data.success) {
         const tasks: CRMTask[] = res.data.data;

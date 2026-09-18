@@ -110,7 +110,7 @@ const groupMessagesByDate = (rawMessages: ChatMessage[]): MessageListItem[] => {
         const label = getDateHeaderLabel(dateObj);
         listItems.push({
           type: 'date_header',
-          id: `date_header_${dateKey}_${msg.id}`,
+          id: `date_header_${dateKey}`,
           dateLabel: label,
         });
       }
@@ -249,17 +249,20 @@ export const ChatDetailScreen: React.FC = () => {
   const groupedMessages = groupMessagesByDate(messages);
 
   useEffect(() => {
-    if (groupedMessages.length > 0 && !isInitialScrollDone.current) {
-      isInitialScrollDone.current = true;
+    if (!isInitialLoading && groupedMessages.length > 0) {
+      requestAnimationFrame(() => {
+        flatListRef.current?.scrollToEnd({ animated: false });
+      });
       const timer = setTimeout(() => {
         flatListRef.current?.scrollToEnd({ animated: false });
-      }, 120);
+        isInitialScrollDone.current = true;
+      }, 50);
       return () => clearTimeout(timer);
     }
-  }, [groupedMessages.length]);
+  }, [isInitialLoading, activeConvId]);
   
   const handleLoadOlder = async () => {
-    if (isLoadingOlder || !conversationId) return;
+    if (isLoadingOlder || !conversationId || !hasMoreMessages) return;
     await fetchOlderMessages(conversationId);
   };
 
@@ -353,39 +356,33 @@ export const ChatDetailScreen: React.FC = () => {
     const text = rawText.trim();
     const lower = text.toLowerCase();
 
-    // A video call MUST contain both 'video' AND 'call', or 📹 emoji, or 'video_call'
-    const isVideoCall = (lower.includes('video') && lower.includes('call')) || text.includes('📹') || lower.includes('video_call');
+    // A call is ONLY matched if it is an explicit call string or emoji marker
+    const isExplicitCall = text.startsWith('📹') || text.startsWith('📞') || text === '[call_log]' ||
+      lower === 'video call' || lower === 'missed video call' || lower === 'outgoing video call' || lower === 'incoming video call' || lower === 'declined video call' ||
+      lower === 'voice call' || lower === 'missed voice call' || lower === 'outgoing voice call' || lower === 'incoming voice call' || lower === 'declined voice call' ||
+      lower === 'call' || lower.includes('tap to call back');
 
-    // A voice call MUST contain 'voice' AND 'call', or be exact 'call' / '[call_log]' / 📞 emoji
-    const isVoiceCall = !isVideoCall && (
-      (lower.includes('voice') && lower.includes('call')) ||
-      lower === 'call' ||
-      lower.startsWith('call ') ||
-      lower.endsWith(' call') ||
-      text.includes('📞') ||
-      text === '[call_log]'
-    );
-
-    if (!isVideoCall && !isVoiceCall) {
+    if (!isExplicitCall) {
       return { isCall: false, isVideo: false, isMissed: false, title: '', subtitle: '' };
     }
 
+    const isVideoCall = lower.includes('video') || text.includes('📹');
     const isMissed = lower.includes('missed') || lower.includes('no answer') || lower.includes('declined') || lower.includes('tap to call back');
 
     let title = '';
     if (isVideoCall) {
-      title = isMissed ? 'Missed video call' : 'Video call';
+      title = isMissed ? 'Missed video call' : (lower.includes('outgoing') ? 'Outgoing video call' : 'Video call');
     } else {
-      title = isMissed ? 'Missed voice call' : 'Voice call';
+      title = isMissed ? 'Missed voice call' : (lower.includes('outgoing') ? 'Outgoing voice call' : 'Voice call');
     }
 
     let subtitle = '';
-    if (lower.includes('tap to call back')) {
+    if (lower.includes('tap to call back') || isMissed) {
       subtitle = 'Tap to call back';
-    } else if (lower.includes('no answer') || isMissed) {
-      subtitle = 'No answer';
+    } else if (lower.includes('declined')) {
+      subtitle = 'Declined';
     } else {
-      const durMatch = text.match(/(\d+\s*(?:sec|min|s|m))/i);
+      const durMatch = text.match(/(\d+\s*(?:sec|min|s|m|\:\d{2}))/i);
       if (durMatch) {
         subtitle = durMatch[1];
       } else {
@@ -400,15 +397,16 @@ export const ChatDetailScreen: React.FC = () => {
     const metadata = item.metadata;
     const isStaff = item.sender === 'staff';
     const rawText = item.text || (item as any).message || '';
+    const lowerText = String(rawText).toLowerCase();
 
     // Priority 1: Structured metadata from API
     if (metadata && metadata.isCall) {
-      const isVideo = metadata.mediaType === 'video';
-      const isMissed = metadata.status === 'missed';
-      const isRejected = metadata.status === 'rejected';
-      const isAnswered = metadata.status === 'answered';
-      const isUnknown = metadata.status === 'unknown';
-      const isOutgoing = metadata.callType === 'outgoing' || isStaff;
+      const isVideo = metadata.mediaType === 'video' || lowerText.includes('video') || rawText.includes('📹');
+      const isMissed = metadata.status === 'missed' || lowerText.includes('missed') || lowerText.includes('tap to call back') || lowerText.includes('no answer');
+      const isRejected = !isMissed && (metadata.status === 'rejected' || lowerText.includes('declined') || lowerText.includes('rejected'));
+      const isAnswered = metadata.status === 'answered' || (!isMissed && !isRejected && metadata.status !== 'unknown');
+      const isUnknown = metadata.status === 'unknown' && !isMissed && !isRejected;
+      const isOutgoing = metadata.callType === 'outgoing' || isStaff || lowerText.includes('outgoing');
 
       let title = '';
       if (isVideo) {
@@ -427,13 +425,18 @@ export const ChatDetailScreen: React.FC = () => {
 
       let subtitle = '';
       if (isMissed) {
-        subtitle = 'No answer';
+        subtitle = 'Tap to call back';
       } else if (isRejected) {
         subtitle = 'Declined';
       } else if (isUnknown) {
         subtitle = isOutgoing ? 'Outgoing' : 'Ringing';
       } else if (metadata.duration !== null && metadata.duration !== undefined && metadata.duration > 0) {
         subtitle = formatCallDuration(metadata.duration);
+      } else if (isAnswered) {
+        const durMatch = rawText.match(/(\d+\s*(?:sec|min|s|m)|\d+:\d{2})/i);
+        if (durMatch) {
+          subtitle = durMatch[1];
+        }
       }
 
       return {
@@ -454,7 +457,7 @@ export const ChatDetailScreen: React.FC = () => {
       const fallback = getCallInfo(rawText);
       return {
         ...fallback,
-        isRejected: false,
+        isRejected: fallback.title.includes('Declined'),
         isAnswered: !fallback.isMissed,
         isUnknown: false,
         duration: null
@@ -465,7 +468,7 @@ export const ChatDetailScreen: React.FC = () => {
     const legacy = getCallInfo(rawText);
     return {
       ...legacy,
-      isRejected: false,
+      isRejected: legacy.title.includes('Declined'),
       isAnswered: legacy.isCall && !legacy.isMissed,
       isUnknown: false,
       duration: null
@@ -779,7 +782,25 @@ export const ChatDetailScreen: React.FC = () => {
           overScrollMode="always"
           keyboardDismissMode="on-drag"
           keyboardShouldPersistTaps="handled"
-          maintainVisibleContentPosition={{ minIndexForVisible: 1 }}
+          maintainVisibleContentPosition={{ minIndexForVisible: 1, autoscrollToTopThreshold: 10 }}
+          onContentSizeChange={() => {
+            if (!isInitialScrollDone.current && groupedMessages.length > 0) {
+              flatListRef.current?.scrollToEnd({ animated: false });
+              isInitialScrollDone.current = true;
+            }
+          }}
+          onLayout={() => {
+            if (!isInitialScrollDone.current && groupedMessages.length > 0) {
+              flatListRef.current?.scrollToEnd({ animated: false });
+            }
+          }}
+          onScroll={(event) => {
+            const offsetY = event.nativeEvent.contentOffset.y;
+            if (offsetY <= 40 && hasMoreMessages && !isLoadingOlder && !isInitialLoading && isInitialScrollDone.current) {
+              handleLoadOlder();
+            }
+          }}
+          scrollEventThrottle={16}
           refreshControl={
             <RefreshControl
               refreshing={isLoadingOlder}
@@ -1210,8 +1231,8 @@ const styles = StyleSheet.create({
     paddingVertical: SPACING.xs,
   },
   bubbleWrapper: {
-    marginVertical: 2,
-    maxWidth: '82%',
+    marginVertical: 4,
+    maxWidth: '85%',
   },
   bubbleWrapperLeft: {
     alignSelf: 'flex-start',
@@ -1221,8 +1242,8 @@ const styles = StyleSheet.create({
   },
   bubbleContainer: {
     borderRadius: RADIUS.lg,
-    paddingHorizontal: 11,
-    paddingVertical: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
     shadowColor: COLORS.shadowColor,
     shadowOffset: { width: 0, height: 1 },
     shadowOpacity: 0.08,
@@ -1739,22 +1760,22 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   callBubbleCard: {
-    paddingVertical: 5,
-    paddingHorizontal: 10,
-    minWidth: 160,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    minWidth: 200,
   },
   callCardMain: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginVertical: 1,
+    marginVertical: 4,
   },
   callIconContainer: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
+    width: 36,
+    height: 36,
+    borderRadius: 18,
     justifyContent: 'center',
     alignItems: 'center',
-    marginRight: 8,
+    marginRight: 10,
   },
   callIconBoxStaff: {
     backgroundColor: 'rgba(255, 255, 255, 0.22)',

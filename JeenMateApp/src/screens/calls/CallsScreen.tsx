@@ -630,12 +630,12 @@ export const CallsScreen: React.FC = () => {
   console.log("waGrouped",waGrouped);
   
   const renderCallCardItem = (item: CallLogItem, isWhatsApp: boolean, isNewest: boolean) => {
-    const isMissed = item.callType === 'missed';
-    const isIncoming = item.callType === 'incoming';
-    const isOutgoing = item.callType === 'outgoing';
+    const isMissed = item.callType === 'missed' || item.status === 'missed' || String(item.callType).toLowerCase() === 'missed';
+    const isIncoming = !isMissed && (item.callType === 'incoming' || String(item.callType).toLowerCase() === 'incoming');
+    const isOutgoing = !isMissed && (item.callType === 'outgoing' || String(item.callType).toLowerCase() === 'outgoing');
 
     const parsedDate = (item.rawTimestamp && item.rawTimestamp > 0)
-      ? new Date(item.rawTimestamp)
+      ? (item.rawTimestamp > 1e11 ? new Date(item.rawTimestamp) : new Date(item.rawTimestamp * 1000))
       : parseCallDate(item.rawCall?.timestamp || item.timestamp);
     const displayTime = formatCallTime(parsedDate, item.timestamp);
     const cardDate = getCallCardDate(item);

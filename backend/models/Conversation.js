@@ -12,7 +12,7 @@ const Conversation = {
           (
             SELECT DATE_FORMAT(CONVERT_TZ(FROM_UNIXTIME(COALESCE(m.whatsapp_timestamp, UNIX_TIMESTAMP(m.created_at) * 1000) / 1000), @@session.time_zone, '+00:00'), '%Y-%m-%dT%H:%i:%s.000Z')
             FROM messages m 
-            WHERE (m.conversation_id = c.id OR (c.customer_id IS NOT NULL AND m.customer_id = c.customer_id))
+            WHERE m.conversation_id = c.id
             ORDER BY COALESCE(m.whatsapp_timestamp, UNIX_TIMESTAMP(m.created_at) * 1000) DESC, m.id DESC
             LIMIT 1
           ),
@@ -23,7 +23,7 @@ const Conversation = {
           (
             SELECT COALESCE(m.whatsapp_timestamp, UNIX_TIMESTAMP(m.created_at) * 1000)
             FROM messages m 
-            WHERE (m.conversation_id = c.id OR (c.customer_id IS NOT NULL AND m.customer_id = c.customer_id))
+            WHERE m.conversation_id = c.id
             ORDER BY COALESCE(m.whatsapp_timestamp, UNIX_TIMESTAMP(m.created_at) * 1000) DESC, m.id DESC
             LIMIT 1
           ),
@@ -37,18 +37,21 @@ const Conversation = {
           SELECT 
             CASE 
               WHEN m.message = '[revoked]' THEN '🚫 You deleted this message' 
-              WHEN m.message_type = 'image' OR m.message IN ('Image', 'Images') THEN '📷 Photo'
-              WHEN m.message_type = 'video' OR m.message = 'Video' THEN '🎥 Video'
-              WHEN m.message_type = 'audio' OR m.message_type = 'voice' OR m.message = 'Voice message' THEN '🎤 Voice message'
-              WHEN m.message_type = 'document' OR m.message = 'Document' THEN '📄 Document'
-              WHEN m.message_type = 'call' OR m.message IN ('Call', 'Voice call', 'Video call', '[call_log]') THEN '📞 Call'
-              WHEN m.message_type = 'location' OR m.message = 'Location' THEN '📍 Location'
-              WHEN m.message_type = 'sticker' OR m.message = 'Sticker' THEN '🏷️ Sticker'
+              WHEN m.message_type = 'image' OR m.message IN ('Image', 'Images', '🖼️ Image') OR m.message LIKE '/9j/%' OR m.message LIKE 'data:image%' THEN '📷 Photo'
+              WHEN m.message_type = 'video' OR m.message IN ('Video', '🎥 Video') THEN '🎥 Video'
+              WHEN m.message_type = 'audio' OR m.message_type = 'voice' OR m.message IN ('Voice message', '🎤 Voice message', '🎤 Voice Message') THEN '🎤 Voice message'
+              WHEN m.message_type = 'document' OR m.message IN ('Document', '📄 Document') THEN '📄 Document'
+              WHEN (m.message_type = 'call' OR m.message LIKE '📹%' OR m.message LIKE '%video call%') AND (m.message LIKE '%missed%' OR m.message LIKE '%declined%') THEN '📹 Missed video call'
+              WHEN m.message_type = 'call' AND (m.message LIKE '%video%' OR m.message LIKE '📹%') THEN '📹 Video call'
+              WHEN m.message_type = 'call' AND (m.message LIKE '%missed%' OR m.message LIKE '%no answer%' OR m.message LIKE '%declined%') THEN '📞 Missed voice call'
+              WHEN m.message_type = 'call' OR m.message IN ('Call', 'Voice call', '[call_log]') OR m.message LIKE '📞%' THEN '📞 Voice call'
+              WHEN m.message_type = 'location' OR m.message IN ('Location', '📍 Location') THEN '📍 Location'
+              WHEN m.message_type = 'sticker' OR m.message IN ('Sticker', '🏷️ Sticker', '🎭 Sticker') THEN '🏷️ Sticker'
               WHEN m.message IS NOT NULL AND TRIM(m.message) != '' THEN m.message
               ELSE NULL
             END 
           FROM messages m 
-          WHERE (m.conversation_id = c.id OR (c.customer_id IS NOT NULL AND m.customer_id = c.customer_id))
+          WHERE m.conversation_id = c.id
           ORDER BY COALESCE(m.whatsapp_timestamp, UNIX_TIMESTAMP(m.created_at) * 1000) DESC, m.id DESC 
           LIMIT 1
         ) as last_message
@@ -92,8 +95,8 @@ const Conversation = {
     return uniqueRows;
   },
 
-  async findById(id) {
-    const query = `
+  async findById(id, userId = null) {
+    let query = `
       SELECT 
         c.id,
         c.customer_id,
@@ -103,7 +106,7 @@ const Conversation = {
           (
             SELECT DATE_FORMAT(CONVERT_TZ(FROM_UNIXTIME(COALESCE(m.whatsapp_timestamp, UNIX_TIMESTAMP(m.created_at) * 1000) / 1000), @@session.time_zone, '+00:00'), '%Y-%m-%dT%H:%i:%s.000Z')
             FROM messages m 
-            WHERE (m.conversation_id = c.id OR (c.customer_id IS NOT NULL AND m.customer_id = c.customer_id))
+            WHERE m.conversation_id = c.id
             ORDER BY COALESCE(m.whatsapp_timestamp, UNIX_TIMESTAMP(m.created_at) * 1000) DESC, m.id DESC
             LIMIT 1
           ),
@@ -118,18 +121,21 @@ const Conversation = {
           SELECT 
             CASE 
               WHEN m.message = '[revoked]' THEN '🚫 You deleted this message' 
-              WHEN m.message_type = 'image' OR m.message IN ('Image', 'Images') THEN '📷 Photo'
-              WHEN m.message_type = 'video' OR m.message = 'Video' THEN '🎥 Video'
-              WHEN m.message_type = 'audio' OR m.message_type = 'voice' OR m.message = 'Voice message' THEN '🎤 Voice message'
-              WHEN m.message_type = 'document' OR m.message = 'Document' THEN '📄 Document'
-              WHEN m.message_type = 'call' OR m.message IN ('Call', 'Voice call', 'Video call', '[call_log]') THEN '📞 Call'
-              WHEN m.message_type = 'location' OR m.message = 'Location' THEN '📍 Location'
-              WHEN m.message_type = 'sticker' OR m.message = 'Sticker' THEN '🏷️ Sticker'
+              WHEN m.message_type = 'image' OR m.message IN ('Image', 'Images', '🖼️ Image') OR m.message LIKE '/9j/%' OR m.message LIKE 'data:image%' THEN '📷 Photo'
+              WHEN m.message_type = 'video' OR m.message IN ('Video', '🎥 Video') THEN '🎥 Video'
+              WHEN m.message_type = 'audio' OR m.message_type = 'voice' OR m.message IN ('Voice message', '🎤 Voice message', '🎤 Voice Message') THEN '🎤 Voice message'
+              WHEN m.message_type = 'document' OR m.message IN ('Document', '📄 Document') THEN '📄 Document'
+              WHEN (m.message_type = 'call' OR m.message LIKE '📹%' OR m.message LIKE '%video call%') AND (m.message LIKE '%missed%' OR m.message LIKE '%declined%') THEN '📹 Missed video call'
+              WHEN m.message_type = 'call' AND (m.message LIKE '%video%' OR m.message LIKE '📹%') THEN '📹 Video call'
+              WHEN m.message_type = 'call' AND (m.message LIKE '%missed%' OR m.message LIKE '%no answer%' OR m.message LIKE '%declined%') THEN '📞 Missed voice call'
+              WHEN m.message_type = 'call' OR m.message IN ('Call', 'Voice call', '[call_log]') OR m.message LIKE '📞%' THEN '📞 Voice call'
+              WHEN m.message_type = 'location' OR m.message IN ('Location', '📍 Location') THEN '📍 Location'
+              WHEN m.message_type = 'sticker' OR m.message IN ('Sticker', '🏷️ Sticker', '🎭 Sticker') THEN '🏷️ Sticker'
               WHEN m.message IS NOT NULL AND TRIM(m.message) != '' THEN m.message
               ELSE NULL
             END 
           FROM messages m 
-          WHERE (m.conversation_id = c.id OR (c.customer_id IS NOT NULL AND m.customer_id = c.customer_id))
+          WHERE m.conversation_id = c.id
           ORDER BY COALESCE(m.whatsapp_timestamp, UNIX_TIMESTAMP(m.created_at) * 1000) DESC, m.id DESC 
           LIMIT 1
         ) as last_message
@@ -137,7 +143,12 @@ const Conversation = {
       LEFT JOIN customers cu ON c.customer_id = cu.id
       WHERE c.id = ?
     `;
-    const [rows] = await pool.execute(query, [id]);
+    const params = [id];
+    if (userId) {
+      query += ` AND c.user_id = ?`;
+      params.push(userId);
+    }
+    const [rows] = await pool.execute(query, params);
     return rows[0] || null;
   },
 

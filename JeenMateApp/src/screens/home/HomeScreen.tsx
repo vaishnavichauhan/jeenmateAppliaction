@@ -41,6 +41,7 @@ export const HomeScreen: React.FC = () => {
     teamMembers,
     fetchTeamMembers,
     clearCompletedTasks,
+    isLoading,
     isRefreshing,
   } = useTaskStore();
 
@@ -758,15 +759,22 @@ export const HomeScreen: React.FC = () => {
           <RefreshControl refreshing={isRefreshing} onRefresh={fetchTasks} colors={[COLORS.primary]} />
         }
         ListEmptyComponent={
-          <View style={styles.emptyContainer}>
-            <Icon name="check-double" size={44} color={COLORS.borderColor} />
-            <Text style={styles.emptyTitle}>No Data</Text>
-            <Text style={styles.emptySub}>
-              {search
-                ? 'No tasks matched your search query.'
-                : 'No tasks available.'}
-            </Text>
-          </View>
+          isLoading || (isRefreshing && tasks.length === 0) ? (
+            <View style={styles.emptyContainer}>
+              <ActivityIndicator size="large" color={COLORS.primary} />
+              <Text style={[styles.emptySub, { marginTop: 12 }]}>Loading tasks...</Text>
+            </View>
+          ) : (
+            <View style={styles.emptyContainer}>
+              <Icon name="check-double" size={44} color={COLORS.borderColor} />
+              <Text style={styles.emptyTitle}>No Data</Text>
+              <Text style={styles.emptySub}>
+                {search
+                  ? 'No tasks matched your search query.'
+                  : 'No tasks available.'}
+              </Text>
+            </View>
+          )
         }
       />
 

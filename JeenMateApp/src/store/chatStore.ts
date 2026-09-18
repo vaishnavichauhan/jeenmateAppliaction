@@ -37,6 +37,8 @@ export interface Conversation {
   is_pinned?: boolean | number;
 }
 
+export type WhatsAppSyncStatus = 'idle' | 'initializing' | 'syncing' | 'ready' | 'error';
+
 interface ChatState {
   conversations: Conversation[];
   activeConversation: Conversation | null;
@@ -45,18 +47,22 @@ interface ChatState {
   isLoading: boolean;
   isSending: boolean;
   isSyncing: boolean;
+  syncStatus: WhatsAppSyncStatus;
+  syncProgress: { total: number; completed: number } | null;
   whatsappStatus: 'online' | 'waiting' | 'offline';
   isSocketListening: boolean;
   hasMoreMessages: boolean;
   isLoadingOlder: boolean;
 
   clearMessages: () => void;
+  resetChatState: () => Promise<void>;
   fetchConversations: () => Promise<void>;
   fetchMessages: (conversationId: string) => Promise<void>;
   fetchOlderMessages: (conversationId: string) => Promise<number>;
   sendMessage: (conversationId: string, text: string) => Promise<boolean>;
   setActiveConversation: (conversation: Conversation | null) => void;
   setSearchQuery: (query: string) => void;
+  setSyncStatus: (status: WhatsAppSyncStatus) => void;
   syncWhatsAppChats: () => Promise<{ success: boolean; message: string }>;
   setupSocketListeners: () => void;
 }
@@ -143,6 +149,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
   isLoading: false,
   isSending: false,
   isSyncing: false,
+  syncStatus: 'idle',
+  syncProgress: null,
   whatsappStatus: 'online',
   isSocketListening: false,
   hasMoreMessages: true,
@@ -152,12 +160,38 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set({ messages: [], isLoading: false });
   },
 
+  resetChatState: async () => {
+    set({
+      conversations: [],
+      activeConversation: null,
+      messages: [],
+      searchQuery: '',
+      isLoading: false,
+      isSending: false,
+      isSyncing: false,
+      syncStatus: 'idle',
+      syncProgress: null,
+      hasMoreMessages: true,
+      isLoadingOlder: false,
+    });
+    try {
+      await AsyncStorage.removeItem(STORAGE_KEY_CONVS);
+    } catch (e) {
+      console.log('[ChatStore] Error clearing conversations cache:', e);
+    }
+  },
+
+  setSyncStatus: (syncStatus: WhatsAppSyncStatus) => {
+    set({ syncStatus });
+  },
+
   fetchConversations: async () => {
     try {
       set({ isLoading: true });
       const res = await apiClient.get('/api/conversations');
       if (res.data && res.data.success) {
         const sorted = sortConversations(res.data.data);
+        console.log(`[ChatStore] Conversations fetched: ${sorted.length} | syncStatus: ${get().syncStatus}`);
         set({ conversations: sorted, isLoading: false });
         await AsyncStorage.setItem(STORAGE_KEY_CONVS, JSON.stringify(sorted));
         return;
@@ -186,7 +220,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       if (res.data && res.data.success) {
         const rawMsgs: ChatMessage[] = res.data.data || [];
 
-        // Deduplicate messages by ID and whatsapp_message_id
+        // Deduplicate messages by ID, whatsapp_message_id, and near-simultaneous staff messages
         const seenIds = new Set<string>();
         const seenWaIds = new Set<string>();
         const uniqueMsgs: ChatMessage[] = [];
@@ -195,6 +229,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
           if (!m.id) continue;
           if (seenIds.has(String(m.id))) continue;
           if (m.whatsapp_message_id && seenWaIds.has(m.whatsapp_message_id)) continue;
+
+          // Check if this is an outgoing duplicate of an already added outgoing message with same text within 5 seconds
+          if (m.sender === 'staff' && m.text) {
+            const mTime = getMessageTime(m);
+            const isDuplicateStaff = uniqueMsgs.some(
+              (prev) =>
+                prev.sender === 'staff' &&
+                prev.text === m.text &&
+                Math.abs(getMessageTime(prev) - mTime) < 5000
+            );
+            if (isDuplicateStaff) {
+              continue;
+            }
+          }
 
           seenIds.add(String(m.id));
           if (m.whatsapp_message_id) seenWaIds.add(m.whatsapp_message_id);
@@ -209,11 +257,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
           isLoading: false,
         });
 
-        // Clear unread count locally for this conversation
+        // Update conversation last_message and clear unread count in conversations list
+        const lastM = sortedMsgs.length > 0 ? sortedMsgs[sortedMsgs.length - 1] : null;
         set((state) => ({
-          conversations: state.conversations.map((c) =>
-            c.id === conversationId ? { ...c, unread_count: 0 } : c
-          ),
+          conversations: state.conversations.map((c) => {
+            if (c.id === conversationId) {
+              const updatedObj = res.data.conversation ? { ...c, ...res.data.conversation } : c;
+              return {
+                ...updatedObj,
+                unread_count: 0,
+                last_message: lastM ? (lastM.text || (lastM as any).message || updatedObj.last_message) : updatedObj.last_message,
+                last_message_at: lastM ? (lastM.timestamp || updatedObj.last_message_at) : updatedObj.last_message_at,
+              };
+            }
+            return c;
+          }),
         }));
 
         // Join socket room
@@ -262,6 +320,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
           if (!m.id) return false;
           if (existingIds.has(String(m.id))) return false;
           if (m.whatsapp_message_id && existingWaIds.has(m.whatsapp_message_id)) return false;
+          if (m.sender === 'staff' && m.text) {
+            const mTime = getMessageTime(m);
+            const isDuplicateStaff = currentMessages.some(
+              (prev) =>
+                prev.sender === 'staff' &&
+                prev.text === m.text &&
+                Math.abs(getMessageTime(prev) - mTime) < 5000
+            );
+            if (isDuplicateStaff) return false;
+          }
           return true;
         });
 
@@ -346,12 +414,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   syncWhatsAppChats: async () => {
-    set({ isSyncing: true });
+    set({ isSyncing: true, syncStatus: 'syncing' });
     try {
       const res = await apiClient.post('/api/whatsapp/sync');
       await get().fetchConversations();
       return { success: true, message: res.data?.message || 'Chats synced successfully!' };
     } catch (err: any) {
+      set({ syncStatus: 'error' });
       return { success: false, message: err.response?.data?.message || 'Sync failed: WhatsApp offline' };
     } finally {
       set({ isSyncing: false });
@@ -362,30 +431,51 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (get().isSocketListening) return;
     const socket = getSocket();
 
+    // 1. WhatsApp Sync Status Listener
+    socket.on('whatsapp_sync_status', (data: { userId?: number; status: WhatsAppSyncStatus; totalChats?: number; completed?: number }) => {
+      if (data && data.status) {
+        console.log(`[ChatStore:Socket] Sync status updated: ${data.status} (${data.completed || 0}/${data.totalChats || 0})`);
+        set({
+          syncStatus: data.status,
+          syncProgress: data.totalChats ? { total: data.totalChats, completed: data.completed || 0 } : null,
+        });
+        if (data.status === 'ready') {
+          get().fetchConversations();
+        }
+      }
+    });
+
+    // 2. New Message Listener
     socket.on('new_message', (payload: { conversationId: string; message: ChatMessage }) => {
       const { activeConversation, conversations } = get();
+      const rawMsg = payload.message;
+      if (!rawMsg) return;
+
+      const msgText = rawMsg.text || (rawMsg as any).message || '';
+      const msgTimestamp = rawMsg.timestamp || new Date().toISOString();
+      const msgWaTime = getMessageTime(rawMsg);
 
       if (activeConversation && String(activeConversation.id) === String(payload.conversationId)) {
         set((state) => {
           // Check if message already exists by ID or whatsapp_message_id
           const existingIdx = state.messages.findIndex(
             (m) =>
-              (payload.message.id && String(m.id) === String(payload.message.id)) ||
-              (payload.message.whatsapp_message_id &&
+              (rawMsg.id && String(m.id) === String(rawMsg.id)) ||
+              (rawMsg.whatsapp_message_id &&
                 m.whatsapp_message_id &&
-                m.whatsapp_message_id === payload.message.whatsapp_message_id) ||
-              (payload.message.sender === 'staff' &&
+                m.whatsapp_message_id === rawMsg.whatsapp_message_id) ||
+              (rawMsg.sender === 'staff' &&
                 String(m.id).startsWith('msg_staff_') &&
-                m.text === payload.message.text)
+                (m.text === msgText || (m as any).message === msgText))
           );
 
           let updated: ChatMessage[];
           if (existingIdx >= 0) {
             // Replace existing or optimistic version
             updated = [...state.messages];
-            updated[existingIdx] = payload.message;
+            updated[existingIdx] = rawMsg;
           } else {
-            updated = [...state.messages, payload.message];
+            updated = [...state.messages, rawMsg];
           }
 
           return { messages: sortMessages(updated) };
@@ -403,11 +493,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const updatedConvs = state.conversations.map((c) => {
           if (String(c.id) === String(payload.conversationId)) {
             const isCurrentChat = activeConversation && String(activeConversation.id) === String(payload.conversationId);
+            const currentLastTime = parseTime(c.last_message_at);
+
+            // Timestamp-aware: only update last_message if the new message is newer or equal
+            const shouldUpdatePreview = msgWaTime >= currentLastTime || !c.last_message;
+
             return {
               ...c,
-              last_message: payload.message.text,
-              last_message_at: payload.message.timestamp || new Date().toISOString(),
-              unread_count: isCurrentChat ? 0 : (c.unread_count || 0) + (payload.message.sender === 'staff' ? 0 : 1),
+              last_message: shouldUpdatePreview ? msgText : c.last_message,
+              last_message_at: shouldUpdatePreview ? msgTimestamp : c.last_message_at,
+              unread_count: isCurrentChat ? 0 : (c.unread_count || 0) + (rawMsg.sender === 'staff' ? 0 : 1),
             };
           }
           return c;
@@ -416,17 +511,30 @@ export const useChatStore = create<ChatState>((set, get) => ({
       });
     });
 
-    socket.on('conversation_updated', (updatedConv: Conversation) => {
-      set((state) => {
-        const exists = state.conversations.some((c) => String(c.id) === String(updatedConv.id));
-        let updatedList: Conversation[];
-        if (exists) {
-          updatedList = state.conversations.map((c) => (String(c.id) === String(updatedConv.id) ? updatedConv : c));
-        } else {
-          updatedList = [updatedConv, ...state.conversations];
-        }
-        return { conversations: sortConversations(updatedList) };
-      });
+    // 3. Conversation Updated Listener (handles sync signals & individual conversation updates)
+    socket.on('conversation_updated', (payload: any) => {
+      if (!payload) return;
+
+      // Handle batch sync update signals
+      if (payload.synced || payload.priorityDone || payload.warmupComplete || payload.backgroundChunk) {
+        console.log('[ChatStore:Socket] Received sync conversation update signal. Refreshing conversation list...');
+        get().fetchConversations();
+        return;
+      }
+
+      // Handle single conversation object update
+      if (payload.id) {
+        set((state) => {
+          const exists = state.conversations.some((c) => String(c.id) === String(payload.id));
+          let updatedList: Conversation[];
+          if (exists) {
+            updatedList = state.conversations.map((c) => (String(c.id) === String(payload.id) ? { ...c, ...payload } : c));
+          } else {
+            updatedList = [payload as Conversation, ...state.conversations];
+          }
+          return { conversations: sortConversations(updatedList) };
+        });
+      }
     });
 
     socket.on('whatsapp_status', (statusData: { status: 'online' | 'waiting' | 'offline' }) => {

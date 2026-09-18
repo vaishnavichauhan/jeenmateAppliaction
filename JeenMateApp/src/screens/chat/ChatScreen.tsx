@@ -41,6 +41,8 @@ export const ChatScreen: React.FC = () => {
     setupSocketListeners,
     isLoading,
     isSyncing,
+    syncStatus,
+    syncProgress,
     clearMessages,
   } = useChatStore();
 
@@ -177,19 +179,34 @@ export const ChatScreen: React.FC = () => {
   };
 
   const getCleanMessagePreview = (msg?: string) => {
-    if (!msg || !String(msg).trim()) return 'No messages yet';
+    if (!msg || !String(msg).trim()) {
+      if (syncStatus === 'syncing' || syncStatus === 'initializing' || isSyncing) {
+        return 'Syncing messages...';
+      }
+      return 'No messages yet';
+    }
     const raw = String(msg).trim();
     if (raw === '[revoked]') return '🚫 You deleted this message';
     if (raw.startsWith('/9j/') || (raw.length > 100 && /^[A-Za-z0-9+/=]+$/.test(raw.slice(0, 40)))) {
       return '📷 Photo';
     }
     const lower = raw.toLowerCase();
-    if (lower.includes('video') && (lower.includes('call') || raw.includes('📹'))) {
-      return lower.includes('missed') ? 'Missed video call' : 'Video call';
+
+    // Check for explicit call messages
+    const isExplicitCall = raw.startsWith('📹') || raw.startsWith('📞') || raw === '[call_log]' ||
+      lower === 'video call' || lower === 'missed video call' || lower === 'outgoing video call' || lower === 'incoming video call' || lower === 'declined video call' ||
+      lower === 'voice call' || lower === 'missed voice call' || lower === 'outgoing voice call' || lower === 'incoming voice call' || lower === 'declined voice call' ||
+      lower === 'call' || lower.includes('tap to call back');
+
+    if (isExplicitCall) {
+      const isVideo = lower.includes('video') || raw.includes('📹');
+      const isMissed = lower.includes('missed') || lower.includes('declined') || lower.includes('no answer') || lower.includes('tap to call back');
+      if (isVideo) {
+        return isMissed ? '📹 Missed video call' : '📹 Video call';
+      }
+      return isMissed ? '📞 Missed voice call' : '📞 Voice call';
     }
-    if (lower.includes('voice') || lower.includes('call') || raw === '[call_log]' || raw.includes('📞')) {
-      return lower.includes('missed') ? 'Missed voice call' : 'Voice call';
-    }
+
     if (raw === 'Images' || raw === 'Image' || raw === '🖼️ Image') return '📷 Photo';
     if (raw === 'Video' || raw === '🎥 Video') return '🎥 Video';
     if (raw === 'Voice message' || raw === '🎤 Voice Message' || raw === '🎤 Voice message') return '🎤 Voice message';

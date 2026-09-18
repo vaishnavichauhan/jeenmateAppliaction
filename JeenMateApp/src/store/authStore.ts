@@ -195,6 +195,11 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       useTaskStore.getState().resetTasks?.();
     } catch (e) {}
 
+    try {
+      const { useInternalChatStore } = require('./internalChatStore');
+      useInternalChatStore.setState({ colleagues: [], activeColleague: null, messages: [] });
+    } catch (e) {}
+
     set({
       token: null,
       user: null,

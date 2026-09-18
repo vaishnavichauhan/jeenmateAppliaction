@@ -34,16 +34,36 @@ export const LinkScreen: React.FC = () => {
     resetSession,
     getQrPageUrl,
     isLoading,
+    isCheckingStatus,
+    hasCheckedStatus,
+    setupSocketListeners,
     isResetting,
   } = useWhatsAppStore();
 
   const qrPageUrl = getQrPageUrl();
 
-  // Only check WhatsApp status once when LinkScreen gains focus (no continuous polling)
+  // Check WhatsApp status and listen for live socket events and auto-refresh when scanning QR code
   useFocusEffect(
     useCallback(() => {
       fetchStatus();
-    }, [fetchStatus])
+      setupSocketListeners();
+
+      // If disconnected, poll status every 2.5s so scanning QR code immediately auto-refreshes to Connected
+      let pollTimer: any = null;
+      if (!isConnected) {
+        pollTimer = setInterval(() => {
+          if (!useWhatsAppStore.getState().isConnected) {
+            fetchStatus();
+          } else {
+            clearInterval(pollTimer);
+          }
+        }, 2500);
+      }
+
+      return () => {
+        if (pollTimer) clearInterval(pollTimer);
+      };
+    }, [fetchStatus, setupSocketListeners, isConnected])
   );
 
   const [showUrlModal, setShowUrlModal] = useState(false);
@@ -102,151 +122,163 @@ export const LinkScreen: React.FC = () => {
       />
       <ScrollView contentContainerStyle={styles.container} showsVerticalScrollIndicator={false}>
         {/* Main Connection Card */}
-      <View style={styles.card}>
-        {isConnected ? (
-          <View style={styles.connectedContainer}>
-            <View style={styles.successIconBox}>
-              <Icon name="check-double" size={32} color={COLORS.whatsappGreen} strokeWidth={2.5} />
+        <View style={styles.card}>
+          {isCheckingStatus && !hasCheckedStatus ? (
+            <View style={styles.statusLoadingContainer}>
+              <ActivityIndicator size="large" color={COLORS.primary} />
+              <Text style={styles.statusLoadingTitle}>Checking WhatsApp Session</Text>
+              <Text style={styles.statusLoadingSub}>
+                Connecting to WhatsApp service, please wait...
+              </Text>
             </View>
-            <Text style={styles.connectedTitle}>Session Active & Ready</Text>
-            <View style={styles.sessionDetailsBox}>
-              <View style={styles.detailRow}>
-                <Text style={styles.detailLabel}>Connected Name</Text>
-                <Text style={styles.detailValue}>{name || 'Staff Assistant'}</Text>
+          ) : isConnected ? (
+            <View style={styles.connectedContainer}>
+              <View style={styles.successIconBox}>
+                <Icon name="check-double" size={32} color={COLORS.whatsappGreen} strokeWidth={2.5} />
               </View>
-              <View style={styles.detailDivider} />
-              <View style={styles.detailRow}>
-                <Text style={styles.detailLabel}>Connected Status</Text>
-                <Text style={[styles.detailValue, { color: COLORS.whatsappGreen, fontWeight: '700' }]}>
-                  {isConnected ? 'Connected' : 'Offline'}
+              <Text style={styles.connectedTitle}>Session Active & Ready</Text>
+              <View style={styles.sessionDetailsBox}>
+                <View style={styles.detailRow}>
+                  <Text style={styles.detailLabel}>Connected Name</Text>
+                  <Text style={styles.detailValue}>{name || 'Staff Assistant'}</Text>
+                </View>
+                <View style={styles.detailDivider} />
+                <View style={styles.detailRow}>
+                  <Text style={styles.detailLabel}>Connected Status</Text>
+                  <Text style={[styles.detailValue, { color: COLORS.whatsappGreen, fontWeight: '700' }]}>
+                    {isConnected ? 'Connected' : 'Offline'}
+                  </Text>
+                </View>
+                <View style={styles.detailDivider} />
+                <View style={styles.detailRow}>
+                  <Text style={styles.detailLabel}>Phone Number</Text>
+                  <Text style={styles.detailValue}>{phone || 'Active'}</Text>
+                </View>
+                <View style={styles.detailDivider} />
+                <View style={styles.detailRow}>
+                  <Text style={styles.detailLabel}>Socket Status</Text>
+                  <Text style={[styles.detailValue, { color: COLORS.whatsappGreen }]}>Online (2-way)</Text>
+                </View>
+              </View>
+            </View>
+          ) : (
+            <View style={styles.qrContainer}>
+              <Text style={styles.qrInstructionsTitle}>Scan to Link WhatsApp</Text>
+              <Text style={styles.qrInstructionsSub}>
+                Point your WhatsApp camera at the code below, or open the link on PC.
+              </Text>
+
+              <View style={styles.qrImageFrame}>
+                {isLoading ? (
+                  <View style={styles.qrLoadingBox}>
+                    <ActivityIndicator size="large" color={COLORS.primary} />
+                    <Text style={styles.qrLoadingText}>
+                      Generating QR code... Please wait
+                    </Text>
+                  </View>
+                ) : qrDataUrl ? (
+                  <Image
+                    source={{ uri: qrDataUrl }}
+                    style={styles.qrImage}
+                    resizeMode="contain"
+                  />
+                ) : (
+                  <View style={styles.qrEmptyBox}>
+                    <Icon name="qr-code" size={46} color={COLORS.textMuted} strokeWidth={1.5} />
+                    <Text style={styles.qrEmptyTitle}>No QR Code Active</Text>
+                    <Text style={styles.qrEmptySub}>
+                      Tap "Generate QR Code" below to generate a new WhatsApp QR code.
+                    </Text>
+                  </View>
+                )}
+              </View>
+
+              {/* Direct Regenerate / Generate QR button */}
+              <TouchableOpacity
+                style={styles.regenerateButton}
+                onPress={() => regenerateQr()}
+                disabled={isLoading}
+                activeOpacity={0.8}
+              >
+                {isLoading ? (
+                  <ActivityIndicator size="small" color={COLORS.primaryNavy} />
+                ) : (
+                  <>
+                    <Icon name="refresh" size={16} color={COLORS.primaryNavy} strokeWidth={2.2} />
+                    <Text style={styles.regenerateButtonText}>
+                      {qrDataUrl ? 'Regenerate QR Code' : 'Generate QR Code'}
+                    </Text>
+                  </>
+                )}
+              </TouchableOpacity>
+
+              {/* Note regarding QR Code expiration */}
+              <View style={styles.expiryNoteBox}>
+                <View style={styles.expiryNoteHeader}>
+                  <Icon name="clock" size={13} color="#B45309" strokeWidth={2.2} />
+                  <Text style={styles.expiryNoteTitle}>Important Note:</Text>
+                </View>
+                <Text style={styles.expiryNoteText}>
+                  The QR code expires in 1 minute. If you do not scan it before expiry, please press <Text style={{ fontWeight: '700' }}>"Regenerate QR Code"</Text> to generate a new one.
                 </Text>
               </View>
-              <View style={styles.detailDivider} />
-              <View style={styles.detailRow}>
-                <Text style={styles.detailLabel}>Phone Number</Text>
-                <Text style={styles.detailValue}>{phone || 'Active'}</Text>
-              </View>
-              <View style={styles.detailDivider} />
-              <View style={styles.detailRow}>
-                <Text style={styles.detailLabel}>Socket Status</Text>
-                <Text style={[styles.detailValue, { color: COLORS.whatsappGreen }]}>Online (2-way)</Text>
+            </View>
+          )}
+
+          {/* QR Page Link & Sharing (only when not checking and not connected) */}
+          {(!isCheckingStatus || hasCheckedStatus) && !isConnected && (
+            <View style={styles.linkShareSection}>
+              <View style={styles.actionButtonsRow}>
+                <TouchableOpacity
+                  style={styles.actionBtnOutline}
+                  onPress={handleCopyLink}
+                  activeOpacity={0.8}
+                >
+                  <Icon name="copy" size={16} color={COLORS.primary} />
+                  <Text style={styles.actionBtnOutlineText}>Show Full URL</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={styles.actionBtnPrimary}
+                  onPress={handleShareLink}
+                  activeOpacity={0.8}
+                >
+                  <Icon name="share" size={16} color={COLORS.bgWhite} />
+                  <Text style={styles.actionBtnPrimaryText}>Share</Text>
+                </TouchableOpacity>
               </View>
             </View>
-          </View>
-        ) : (
-          <View style={styles.qrContainer}>
-            <Text style={styles.qrInstructionsTitle}>Scan to Link WhatsApp</Text>
-            <Text style={styles.qrInstructionsSub}>
-              Point your WhatsApp camera at the code below, or open the link on PC.
-            </Text>
+          )}
 
-            <View style={styles.qrImageFrame}>
-              {isLoading ? (
-                <View style={styles.qrLoadingBox}>
-                  <ActivityIndicator size="large" color={COLORS.primary} />
-                  <Text style={styles.qrLoadingText}>
-                    Generating QR code... Please wait
-                  </Text>
-                </View>
-              ) : qrDataUrl ? (
-                <Image
-                  source={{ uri: qrDataUrl }}
-                  style={styles.qrImage}
-                  resizeMode="contain"
-                />
-              ) : (
-                <View style={styles.qrEmptyBox}>
-                  <Icon name="qr-code" size={46} color={COLORS.textMuted} strokeWidth={1.5} />
-                  <Text style={styles.qrEmptyTitle}>No QR Code Active</Text>
-                  <Text style={styles.qrEmptySub}>
-                    Tap "Generate QR Code" below to generate a new WhatsApp QR code.
-                  </Text>
-                </View>
-              )}
+          {/* Instructions list (only when not checking and not connected) */}
+          {(!isCheckingStatus || hasCheckedStatus) && !isConnected && (
+            <View style={styles.guideBox}>
+              <Text style={styles.guideTitle}>How to connect:</Text>
+              <Text style={styles.guideStep}>1. Open WhatsApp on your device</Text>
+              <Text style={styles.guideStep}>2. Tap Settings &gt; Linked Devices &gt; Link a Device</Text>
+              <Text style={styles.guideStep}>3. Scan the QR code shown above or open the shared link on PC</Text>
             </View>
+          )}
 
-            {/* Direct Regenerate / Generate QR button */}
+          {/* Reset Session Button */}
+          {(!isCheckingStatus || hasCheckedStatus) && (
             <TouchableOpacity
-              style={styles.regenerateButton}
-              onPress={() => regenerateQr()}
-              disabled={isLoading}
+              style={styles.resetButton}
+              onPress={handleResetSession}
+              disabled={isResetting}
               activeOpacity={0.8}
             >
-              {isLoading ? (
-                <ActivityIndicator size="small" color={COLORS.primaryNavy} />
+              {isResetting ? (
+                <ActivityIndicator size="small" color={COLORS.accentRed} />
               ) : (
                 <>
-                  <Icon name="refresh" size={16} color={COLORS.primaryNavy} strokeWidth={2.2} />
-                  <Text style={styles.regenerateButtonText}>
-                    {qrDataUrl ? 'Regenerate QR Code' : 'Generate QR Code'}
-                  </Text>
+                  <Icon name="refresh" size={16} color={COLORS.accentRed} />
+                  <Text style={styles.resetButtonText}>Disconnect & Reset Session</Text>
                 </>
               )}
             </TouchableOpacity>
-
-            {/* Note regarding QR Code expiration */}
-            <View style={styles.expiryNoteBox}>
-              <View style={styles.expiryNoteHeader}>
-                <Icon name="clock" size={13} color="#B45309" strokeWidth={2.2} />
-                <Text style={styles.expiryNoteTitle}>Important Note:</Text>
-              </View>
-              <Text style={styles.expiryNoteText}>
-                The QR code expires in 1 minute. If you do not scan it before expiry, please press <Text style={{ fontWeight: '700' }}>"Regenerate QR Code"</Text> to generate a new one.
-              </Text>
-            </View>
-          </View>
-        )}
-
-        {/* QR Page Link & Sharing */}
-        <View style={styles.linkShareSection}>
-         {/*  */}
-
-          <View style={styles.actionButtonsRow}>
-            <TouchableOpacity
-              style={styles.actionBtnOutline}
-              onPress={handleCopyLink}
-              activeOpacity={0.8}
-            >
-              <Icon name="copy" size={16} color={COLORS.primary} />
-              <Text style={styles.actionBtnOutlineText}>Show Full URL</Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={styles.actionBtnPrimary}
-              onPress={handleShareLink}
-              activeOpacity={0.8}
-            >
-              <Icon name="share" size={16} color={COLORS.bgWhite} />
-              <Text style={styles.actionBtnPrimaryText}>Share</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-
-        {/* Instructions list */}
-        <View style={styles.guideBox}>
-          <Text style={styles.guideTitle}>How to connect:</Text>
-          <Text style={styles.guideStep}>1. Open WhatsApp on your device</Text>
-          <Text style={styles.guideStep}>2. Tap Settings &gt; Linked Devices &gt; Link a Device</Text>
-          <Text style={styles.guideStep}>3. Scan the QR code shown above or open the shared link on PC</Text>
-        </View>
-
-        {/* Reset Session Button */}
-        <TouchableOpacity
-          style={styles.resetButton}
-          onPress={handleResetSession}
-          disabled={isResetting}
-          activeOpacity={0.8}
-        >
-          {isResetting ? (
-            <ActivityIndicator size="small" color={COLORS.accentRed} />
-          ) : (
-            <>
-              <Icon name="refresh" size={16} color={COLORS.accentRed} />
-              <Text style={styles.resetButtonText}>Disconnect & Reset Session</Text>
-            </>
           )}
-        </TouchableOpacity>
-      </View>
+        </View>
       </ScrollView>
 
       {/* Show Full URL & Copy Modal */}
@@ -410,6 +442,23 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.05,
     shadowRadius: 10,
     elevation: 2,
+  },
+  statusLoadingContainer: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 60,
+  },
+  statusLoadingTitle: {
+    fontSize: 17,
+    fontWeight: '700',
+    color: COLORS.primaryNavy,
+    marginTop: 16,
+  },
+  statusLoadingSub: {
+    fontSize: 13,
+    color: COLORS.textMuted,
+    marginTop: 6,
+    textAlign: 'center',
   },
   connectedContainer: {
     alignItems: 'center',
