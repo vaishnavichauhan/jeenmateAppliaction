@@ -169,16 +169,16 @@ const Message = {
     return formatMessageRow(rows[0]) || null;
   },
 
-  async create({ conversationId, customerId = null, sender, text, status = 'sent', whatsappMessageId = null, messageType = 'text', metadata = null, userId = null }) {
+  async create({ conversationId, customerId = null, sender, text, status = 'sent', whatsappMessageId = null, messageType = 'text', metadata = null, userId = null, whatsappAccountId = null }) {
     const direction = sender === 'staff' ? 'outgoing' : 'incoming';
     const nowMs = Date.now();
     const nowUtc = new Date(nowMs).toISOString().slice(0, 19).replace('T', ' ');
     const metadataJson = metadata ? (typeof metadata === 'string' ? metadata : JSON.stringify(metadata)) : null;
 
     const [result] = await pool.execute(
-      `INSERT INTO messages (conversation_id, customer_id, direction, message, whatsapp_message_id, message_type, whatsapp_timestamp, status, created_at, user_id, metadata)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [conversationId, customerId, direction, text, whatsappMessageId, messageType, nowMs, status, nowUtc, userId, metadataJson]
+      `INSERT INTO messages (conversation_id, customer_id, direction, message, whatsapp_message_id, message_type, whatsapp_timestamp, status, created_at, user_id, whatsapp_account_id, metadata)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [conversationId, customerId, direction, text, whatsappMessageId, messageType, nowMs, status, nowUtc, userId, whatsappAccountId, metadataJson]
     );
 
     await pool.execute(

@@ -6,6 +6,22 @@ function initSocket(io) {
   io.on('connection', (socket) => {
     console.log(`[Socket] Client connected: ${socket.id}`);
 
+    // Join WhatsApp account room (for multi-account scoped events)
+    socket.on('join_whatsapp_account', (accountId) => {
+      if (accountId) {
+        socket.join(`whatsapp_account_${accountId}`);
+        console.log(`[Socket] Socket ${socket.id} joined room whatsapp_account_${accountId}`);
+      }
+    });
+
+    // Leave WhatsApp account room
+    socket.on('leave_whatsapp_account', (accountId) => {
+      if (accountId) {
+        socket.leave(`whatsapp_account_${accountId}`);
+        console.log(`[Socket] Socket ${socket.id} left room whatsapp_account_${accountId}`);
+      }
+    });
+
     // Join conversation room for real-time messaging
     socket.on('join_conversation', (conversationId) => {
       if (conversationId) {
@@ -96,29 +112,48 @@ function broadcastInternalMessage(senderId, receiverId, message) {
   ioInstance.to(`user_channel_${senderId}`).emit('internal_inbox_update', message);
 }
 
-function broadcastNewMessage(conversationId, message) {
+function broadcastNewMessage(conversationId, message, accountId = null) {
   if (!ioInstance) return;
-  // Emit once to all connected clients (conversation rooms & conversation list)
-  ioInstance.emit('new_message', { conversationId, message });
+  const payload = { conversationId, message, accountId };
+  if (accountId) {
+    ioInstance.to(`whatsapp_account_${accountId}`).emit('new_message', payload);
+  }
+  // Emit to conversation room as well
+  ioInstance.to(`conv_${conversationId}`).emit('new_message', payload);
+  // Fallback broadcast
+  ioInstance.emit('new_message', payload);
 }
 
-function broadcastConversationUpdate(conversation) {
+function broadcastConversationUpdate(conversation, accountId = null) {
   if (!ioInstance) return;
-  ioInstance.emit('conversation_updated', conversation);
+  const payload = { ...conversation, accountId: accountId || conversation?.whatsapp_account_id };
+  if (payload.accountId) {
+    ioInstance.to(`whatsapp_account_${payload.accountId}`).emit('conversation_updated', payload);
+  }
+  ioInstance.emit('conversation_updated', payload);
 }
 
 function broadcastWhatsAppStatus(statusData) {
   if (!ioInstance) return;
+  if (statusData?.accountId) {
+    ioInstance.to(`whatsapp_account_${statusData.accountId}`).emit('whatsapp_status', statusData);
+  }
   ioInstance.emit('whatsapp_status', statusData);
 }
 
 function broadcastWhatsAppQR(qrData) {
   if (!ioInstance) return;
+  if (qrData?.accountId) {
+    ioInstance.to(`whatsapp_account_${qrData.accountId}`).emit('whatsapp_qr', qrData);
+  }
   ioInstance.emit('whatsapp_qr', qrData);
 }
 
 function broadcastWhatsAppSyncStatus(syncData) {
   if (!ioInstance) return;
+  if (syncData?.accountId) {
+    ioInstance.to(`whatsapp_account_${syncData.accountId}`).emit('whatsapp_sync_status', syncData);
+  }
   ioInstance.emit('whatsapp_sync_status', syncData);
 }
 

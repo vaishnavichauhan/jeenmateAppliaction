@@ -1,28 +1,80 @@
+export const colors = {
+  bg: '#FFFFFF',
+
+  cardBg: '#FFFFFF',
+  cardBorder: '#A8D5CD',
+
+  peacockDark: '#004D5A',
+  peacockMedium: '#0A6B7A',
+  peacockLight: '#E6F4F6',
+
+  greenPrimary: '#00A884',
+  greenDark: '#047857',
+  greenLight: '#E8FAF4',
+  greenBorder: '#A7F3D0',
+
+  textDark: '#063B42',
+  textMuted: '#4E7D82',
+  textPlaceholder: '#8AAEB2',
+
+  inputBg: '#FFFFFF',
+  inputBorder: '#A8D5CD',
+  inputDisabledBg: '#F0F7F6',
+
+  white: '#FFFFFF',
+
+  shadow: '#004D5A',
+};
+
 export const COLORS = {
-  primary: '#1A3B71',
-  primaryNavy: '#16325B',
-  deepNavy: '#0B192C',
-  darkNavy: '#070F1E',
+  // Primary / Peacock Palette
+  primary: '#0A6B7A',
+  primaryNavy: '#004D5A',
+  deepNavy: '#004D5A',
+  darkNavy: '#004D5A',
+  peacockDark: '#004D5A',
+  peacockMedium: '#0A6B7A',
+  peacockLight: '#E6F4F6',
+
+  // Backgrounds & Cards
+  bg: '#FFFFFF',
+  bgLinen: '#FFFFFF',
+  bgWhite: '#FFFFFF',
+  white: '#FFFFFF',
+  cardBg: '#FFFFFF',
+  cardBorder: '#A8D5CD',
+  surfaceCard: '#FFFFFF',
+  surfaceHover: '#E6F4F6',
+  borderColor: '#A8D5CD',
+  shadowColor: '#004D5A',
+  shadow: '#004D5A',
+
+  // Inputs
+  inputBg: '#FFFFFF',
+  inputBorder: '#C8E6E2',
+  inputDisabledBg: '#F0F7F6',
+
+  // WhatsApp & Green Palette
+  greenPrimary: '#00A884',
+  whatsappGreen: '#00A884',
+  whatsappGreenBright: '#00A884',
+  greenDark: '#047857',
+  whatsappDark: '#047857',
+  greenLight: '#E8FAF4',
+  whatsappLight: '#E8FAF4',
+  greenBorder: '#A7F3D0',
+
+  // Typography
+  textDark: '#063B42',
+  textMuted: '#4E7D82',
+  textSubtle: '#8AAEB2',
+  textPlaceholder: '#8AAEB2',
+
+  // Accents / Badges
+  badgeBg: '#E6F4F6',
   accentRed: '#E11D48',
   accentRedHover: '#BE123C',
-  accentLime: '#E8FE26',
-  bgLinen: '#F5F4F0',
-  borderColor: '#E6E4DC',
-  textDark: '#0F172A',
-  bgWhite: '#FFFFFF',
-
-  // WhatsApp & Supporting Accents
-  whatsappGreen: '#00A884',
-  whatsappGreenBright: '#25D366',
-  whatsappLight: '#E7F8F4',
-  whatsappDark: '#128C7E',
-  textMuted: '#64748B',
-  textSubtle: '#94A3B8',
-  badgeBg: '#EEF2F6',
-  surfaceCard: '#FFFFFF',
-  surfaceHover: '#F1F5F9',
-  shadowColor: '#0B192C',
-  inputBg: '#F8FAFC',
+  accentLime: '#00A884',
 };
 
 export const SPACING = {

@@ -1,21 +1,327 @@
 const pool = require('../config/db');
 const sessionManager = require('../services/sessionManager');
+const { WhatsAppAccount, WhatsAppAccountMember } = require('../models');
 
 /**
- * Helper: get the WhatsApp session for the authenticated user.
- * Auto-creates and initializes if not yet started.
+ * Access Control Helper:
+ * Verifies that the authenticated user has permission to view or manage a specific WhatsApp account.
  */
-async function getUserSession(req) {
+async function verifyAccountAccess(req, accountId, requireAdmin = false) {
   const userId = req.user.id;
-  return sessionManager.getOrCreateSession(userId);
+  const userRole = req.user.role;
+  const accId = Number(accountId);
+
+  if (isNaN(accId) || accId <= 0) {
+    return { error: { status: 400, message: 'Invalid WhatsApp Account ID' } };
+  }
+
+  const account = await WhatsAppAccount.findById(accId);
+  if (!account) {
+    return { error: { status: 404, message: 'WhatsApp Account not found' } };
+  }
+
+  if (account.account_type === 'PERSONAL') {
+    if (Number(account.owner_user_id) !== Number(userId)) {
+      return { error: { status: 403, message: 'Forbidden: You do not have access to this Personal WhatsApp account.' } };
+    }
+  } else if (account.account_type === 'TEAM') {
+    if (requireAdmin && userRole !== 'admin') {
+      return { error: { status: 403, message: 'Forbidden: Only Admins can perform this action on Team WhatsApp accounts.' } };
+    }
+    if (userRole !== 'admin') {
+      const isMember = await WhatsAppAccountMember.isMember(accId, userId);
+      if (!isMember) {
+        return { error: { status: 403, message: 'Forbidden: You are not an assigned member of this Team WhatsApp account.' } };
+      }
+    }
+  }
+
+  return { account };
 }
 
-// GET /api/whatsapp/status
-async function getStatus(req, res, next) {
+// -----------------------------------------------------------------------------
+// ACCOUNT MANAGEMENT APIS
+// -----------------------------------------------------------------------------
+
+// GET /api/whatsapp/accounts - List all accessible WhatsApp accounts for the logged-in user
+async function getAccounts(req, res, next) {
   try {
-    const service = await getUserSession(req);
+    const userId = req.user.id;
+    const userRole = req.user.role;
+    const accounts = await WhatsAppAccount.findAccessibleByUser(userId, userRole);
+
+    // Enrich accounts with live connection statuses & members for team accounts
+    const enriched = await Promise.all(accounts.map(async acc => {
+      const activeSession = sessionManager.getSession(acc.id);
+      const isLive = activeSession ? activeSession.isConnected : (acc.status === 'online');
+      let members = [];
+      if (acc.account_type === 'TEAM') {
+        members = await WhatsAppAccountMember.getMembersByAccountId(acc.id);
+      }
+      return {
+        ...acc,
+        whatsapp_name: activeSession?.botName || acc.whatsapp_name || null,
+        is_connected: isLive,
+        status: isLive ? 'online' : (activeSession ? activeSession.status : acc.status),
+        members
+      };
+    }));
+
     return res.status(200).json({
       success: true,
+      data: enriched
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// POST /api/whatsapp/accounts - Create a new WhatsApp account (Personal by anyone, Team by Admin only)
+async function createAccount(req, res, next) {
+  try {
+    const userId = req.user.id;
+    const userRole = req.user.role;
+    const { account_name, account_type = 'PERSONAL' } = req.body;
+
+    if (!account_name || !account_name.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: 'Account name is required'
+      });
+    }
+
+    const type = String(account_type).toUpperCase();
+    if (type !== 'PERSONAL' && type !== 'TEAM') {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid account type. Must be PERSONAL or TEAM.'
+      });
+    }
+
+    if (type === 'TEAM' && userRole !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Forbidden: Only Admins can create Team WhatsApp accounts.'
+      });
+    }
+
+    const sessionId = `session-account-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+    const newAccount = await WhatsAppAccount.create({
+      accountName: account_name.trim(),
+      accountType: type,
+      ownerUserId: type === 'PERSONAL' ? userId : null,
+      createdByUserId: userId,
+      sessionId,
+      status: 'disconnected'
+    });
+
+    // If Team account, automatically add Admin as an explicit member with role='admin'
+    if (type === 'TEAM') {
+      await WhatsAppAccountMember.addMember(newAccount.id, userId, 'admin');
+    }
+
+    return res.status(201).json({
+      success: true,
+      message: `${type === 'TEAM' ? 'Team' : 'Personal'} WhatsApp account created successfully`,
+      data: newAccount
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// GET /api/whatsapp/accounts/:id - Get single WhatsApp account details
+async function getAccountDetails(req, res, next) {
+  try {
+    const { account, error } = await verifyAccountAccess(req, req.params.id);
+    if (error) return res.status(error.status).json({ success: false, message: error.message });
+
+    let members = [];
+    if (account.account_type === 'TEAM') {
+      members = await WhatsAppAccountMember.getMembersByAccountId(account.id);
+    }
+
+    const activeSession = sessionManager.getSession(account.id);
+    return res.status(200).json({
+      success: true,
+      data: {
+        ...account,
+        is_connected: activeSession ? activeSession.isConnected : (account.status === 'online'),
+        members
+      }
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// DELETE /api/whatsapp/accounts/:id - Permanently delete WhatsApp account and all its data
+async function deleteAccount(req, res, next) {
+  try {
+    const requireAdmin = true;
+    const { account, error } = await verifyAccountAccess(req, req.params.id, requireAdmin);
+    if (error) return res.status(error.status).json({ success: false, message: error.message });
+
+    // Destroy session and delete database record
+    await sessionManager.destroySession(account.id, { cleanData: true, deleteAccount: true });
+
+    return res.status(200).json({
+      success: true,
+      message: 'WhatsApp account and all associated data permanently deleted.'
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// POST /api/whatsapp/accounts/:id/disconnect - Disconnect WhatsApp session (preserves account & members)
+async function disconnectAccount(req, res, next) {
+  try {
+    const requireAdmin = true;
+    const { account, error } = await verifyAccountAccess(req, req.params.id, requireAdmin);
+    if (error) return res.status(error.status).json({ success: false, message: error.message });
+
+    // Disconnect active session & clean WhatsApp message history from DB, but preserve account & members
+    await sessionManager.destroySession(account.id, { cleanData: true, deleteAccount: false });
+
+    return res.status(200).json({
+      success: true,
+      message: 'WhatsApp session disconnected. Account preserved for new QR scan.'
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// GET /api/whatsapp/accounts/:id/members - List members of a Team WhatsApp account
+async function getAccountMembers(req, res, next) {
+  try {
+    const { account, error } = await verifyAccountAccess(req, req.params.id);
+    if (error) return res.status(error.status).json({ success: false, message: error.message });
+
+    if (account.account_type !== 'TEAM') {
+      return res.status(400).json({
+        success: false,
+        message: 'Member management is only applicable to Team WhatsApp accounts.'
+      });
+    }
+
+    const members = await WhatsAppAccountMember.getMembersByAccountId(account.id);
+    return res.status(200).json({
+      success: true,
+      data: members
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// POST /api/whatsapp/accounts/:id/members - Update members of a Team WhatsApp account (Admin only)
+async function updateAccountMembers(req, res, next) {
+  try {
+    const { account, error } = await verifyAccountAccess(req, req.params.id, true); // requireAdmin = true
+    if (error) return res.status(error.status).json({ success: false, message: error.message });
+
+    if (account.account_type !== 'TEAM') {
+      return res.status(400).json({
+        success: false,
+        message: 'Member management is only applicable to Team WhatsApp accounts.'
+      });
+    }
+
+    const { user_ids = [] } = req.body;
+    if (!Array.isArray(user_ids)) {
+      return res.status(400).json({
+        success: false,
+        message: 'user_ids must be an array of user IDs'
+      });
+    }
+
+    // Update member list, guaranteeing Admin/Creator remains an explicit member
+    const updatedMembers = await WhatsAppAccountMember.setMembers(account.id, user_ids, req.user.id);
+
+    return res.status(200).json({
+      success: true,
+      message: 'Team WhatsApp access updated successfully',
+      data: updatedMembers
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// -----------------------------------------------------------------------------
+// SCOPED SESSION & MESSAGING APIS
+// -----------------------------------------------------------------------------
+
+// GET /api/whatsapp/accounts/:id/status
+async function getAccountStatus(req, res, next) {
+  try {
+    const { account, error } = await verifyAccountAccess(req, req.params.id);
+    if (error) return res.status(error.status).json({ success: false, message: error.message });
+
+    const status = await sessionManager.getStatus(account.id);
+    return res.status(200).json({
+      success: true,
+      data: {
+        ...status,
+        accountId: account.id,
+        accountName: account.account_name,
+        accountType: account.account_type
+      }
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// GET /api/whatsapp/accounts/:id/qr
+async function getAccountQr(req, res, next) {
+  try {
+    const { account, error } = await verifyAccountAccess(req, req.params.id);
+    if (error) return res.status(error.status).json({ success: false, message: error.message });
+
+    // For Team accounts, only Admin can request/generate the QR code
+    if (account.account_type === 'TEAM' && req.user.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Forbidden: Only Admins can view or scan QR for Team WhatsApp accounts.'
+      });
+    }
+
+    const qr = await sessionManager.getQr(account.id);
+    return res.status(200).json({
+      success: true,
+      data: {
+        ...qr,
+        accountId: account.id,
+        accountName: account.account_name,
+        accountType: account.account_type
+      }
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// POST /api/whatsapp/accounts/:id/restart
+async function restartAccountSession(req, res, next) {
+  try {
+    const { account, error } = await verifyAccountAccess(req, req.params.id);
+    if (error) return res.status(error.status).json({ success: false, message: error.message });
+
+    if (account.account_type === 'TEAM' && req.user.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Forbidden: Only Admins can restart Team WhatsApp accounts.'
+      });
+    }
+
+    const clean = req.query.clean === 'true';
+    const service = await sessionManager.restartSession(account.id, clean);
+    return res.status(200).json({
+      success: true,
+      message: 'WhatsApp session restarted successfully.',
       data: service.getStatus()
     });
   } catch (err) {
@@ -23,93 +329,13 @@ async function getStatus(req, res, next) {
   }
 }
 
-// GET /api/whatsapp/qr
-async function getQr(req, res, next) {
+// POST /api/whatsapp/accounts/:id/sync
+async function syncAccountChats(req, res, next) {
   try {
-    const service = await getUserSession(req);
-    return res.status(200).json({
-      success: true,
-      data: service.getQr()
-    });
-  } catch (err) {
-    next(err);
-  }
-}
+    const { account, error } = await verifyAccountAccess(req, req.params.id);
+    if (error) return res.status(error.status).json({ success: false, message: error.message });
 
-// GET /api/whatsapp/call-logs
-async function getCallLogs(req, res, next) {
-  try {
-    const userId = req.user.id;
-    const limit = parseInt(req.query.limit, 10) || 50;
-
-    const service = await getUserSession(req);
-    const isConnected = !!(service && service.isConnected);
-
-    if (isConnected) {
-      const callLogs = await service.getCallLogs(limit);
-      return res.status(200).json({
-        success: true,
-        isConnected: true,
-        data: callLogs
-      });
-    }
-
-    return res.status(200).json({
-      success: true,
-      isConnected: false,
-      data: []
-    });
-  } catch (err) {
-    next(err);
-  }
-}
-
-// GET /api/whatsapp/qr-inspect
-async function inspectQrPage(req, res, next) {
-  try {
-    const service = await getUserSession(req);
-    if (!service.client || !service.client.pupPage) {
-      return res.json({ success: false, message: 'Client or pupPage not ready' });
-    }
-    const info = await service.client.pupPage.evaluate(() => {
-      const qrCanvas = document.querySelector('canvas');
-      const qrContainer = document.querySelector('[data-ref]');
-      const buttons = Array.from(document.querySelectorAll('button')).map(b => ({
-        text: b.innerText,
-        className: b.className,
-        role: b.getAttribute('role')
-      }));
-      const bodyText = document.body.innerText.slice(0, 500);
-      return {
-        title: document.title,
-        hasCanvas: !!qrCanvas,
-        qrContainerRef: qrContainer ? qrContainer.getAttribute('data-ref') : null,
-        buttons,
-        bodyText
-      };
-    });
-    return res.json({ success: true, info });
-  } catch (err) {
-    return res.json({ success: false, error: err.message });
-  }
-}
-
-// POST /api/whatsapp/restart
-async function restartSession(req, res, next) {
-  try {
-    const service = await getUserSession(req);
-    const clean = req.query.clean === 'true';
-    const result = await service.restart(clean);
-    return res.status(200).json(result);
-  } catch (err) {
-    next(err);
-  }
-}
-
-// POST /api/whatsapp/sync
-async function syncChats(req, res, next) {
-  try {
-    const service = await getUserSession(req);
+    const service = await sessionManager.getOrCreateSession(account.id, account);
     const cleanOld = req.query.clean === 'true' || req.body?.clean === true;
     const result = await service.syncChats({ cleanOld });
     return res.status(200).json(result);
@@ -118,410 +344,126 @@ async function syncChats(req, res, next) {
   }
 }
 
-// GET /api/whatsapp/qr-page (HTML page for browser scanning)
-function getQrPage(req, res) {
-  const html = `
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>jeenMate WhatsApp Session Link</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-  <style>
-    :root {
-      --primary: #1A3B71;
-      --primary-navy: #16325B;
-      --deep-navy: #0B192C;
-      --dark-navy: #070F1E;
-      --accent-red: #E11D48;
-      --accent-lime: #E8FE26;
-      --bg-linen: #F5F4F0;
-      --border-color: #E6E4DC;
-      --text-dark: #0F172A;
-      --bg-white: #FFFFFF;
-      --wa-green: #00A884;
-    }
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      font-family: 'Plus Jakarta Sans', -apple-system, sans-serif;
-      background-color: var(--bg-linen);
-      color: var(--text-dark);
-      min-height: 100vh;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      padding: 24px;
-    }
-    .container {
-      background: var(--bg-white);
-      max-width: 520px;
-      width: 100%;
-      border-radius: 20px;
-      border: 1px solid var(--border-color);
-      box-shadow: 0 20px 40px -15px rgba(11, 25, 44, 0.08);
-      overflow: hidden;
-    }
-    .header {
-      background: linear-gradient(135deg, var(--deep-navy), var(--primary-navy));
-      padding: 28px 24px;
-      color: white;
-      text-align: center;
-    }
-    .badge {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      padding: 6px 14px;
-      border-radius: 999px;
-      font-size: 12px;
-      font-weight: 700;
-      letter-spacing: 0.5px;
-      text-transform: uppercase;
-      margin-bottom: 12px;
-    }
-    .badge.waiting { background: rgba(232, 254, 38, 0.18); color: var(--accent-lime); }
-    .badge.online { background: rgba(0, 168, 132, 0.2); color: #25D366; }
-    .badge.offline { background: rgba(225, 29, 72, 0.2); color: #FF6B8B; }
-    .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
-    h1 { font-size: 22px; font-weight: 800; margin-bottom: 6px; }
-    p.sub { font-size: 14px; opacity: 0.85; }
-    .content { padding: 32px 24px; text-align: center; }
-    .qr-box {
-      width: 280px; height: 280px; margin: 0 auto 24px;
-      border: 2px dashed var(--border-color); border-radius: 16px;
-      display: flex; align-items: center; justify-content: center;
-      background: #FAFAFA; position: relative;
-    }
-    .qr-box img { width: 100%; height: 100%; border-radius: 14px; object-fit: contain; }
-    .instructions {
-      text-align: left; background: #F8F9FA; border-radius: 12px;
-      padding: 16px 20px; font-size: 13px; line-height: 1.6;
-      margin-bottom: 24px; border: 1px solid var(--border-color);
-    }
-    .instructions ol { padding-left: 20px; }
-    .instructions li { margin-bottom: 6px; }
-    .btn-group { display: flex; gap: 12px; }
-    button {
-      flex: 1; padding: 12px 18px; border-radius: 10px;
-      font-size: 14px; font-weight: 600; cursor: pointer;
-      border: none; transition: all 0.2s ease;
-    }
-    .btn-primary { background: var(--primary); color: white; }
-    .btn-primary:hover { background: var(--primary-navy); }
-    .btn-danger { background: #FEE2E2; color: var(--accent-red); }
-    .btn-danger:hover { background: #FCA5A5; }
-    .footer { text-align: center; margin-top: 18px; font-size: 12px; color: #64748B; }
-  </style>
-</head>
-<body>
-  <div class="container">
-    <div class="header">
-      <div id="statusBadge" class="badge waiting">
-        <span class="dot"></span>
-        <span id="statusText">Checking WhatsApp...</span>
-      </div>
-      <h1>jeenMate WhatsApp Link</h1>
-      <p class="sub">Scan with your personal WhatsApp to link your session</p>
-    </div>
-    <div class="content">
-      <div class="qr-box" id="qrContainer">
-        <div id="loadingText" style="color: #64748B; font-size: 14px;">Loading QR code...<br><small style="margin-top:8px;display:block">Please log in from the mobile app first.</small></div>
-        <img id="qrImage" style="display: none;" alt="WhatsApp QR Code" />
-      </div>
-      <div class="instructions">
-        <ol>
-          <li>Log in to the jeenMate mobile app first.</li>
-          <li>Open WhatsApp on your personal device.</li>
-          <li>Tap <strong>Settings</strong> or <strong>Menu (⋮)</strong> &gt; <strong>Linked Devices</strong>.</li>
-          <li>Tap <strong>Link a Device</strong> and point your camera at this QR code.</li>
-        </ol>
-      </div>
-      <div class="btn-group">
-        <button class="btn-primary" onclick="fetchQr(true)">Refresh QR</button>
-        <button class="btn-danger" onclick="resetSession()">Reset Session</button>
-      </div>
-    </div>
-  </div>
-  <div class="footer">jeenMate Support Portal • Per-User WhatsApp Sessions</div>
-  <script>
-    // NOTE: This page requires a token query param to identify the user.
-    // Usage: /api/whatsapp/qr-page?token=<jwt_token>
-    const token = new URLSearchParams(window.location.search).get('token') || '';
-    const headers = token ? { 'Authorization': 'Bearer ' + token } : {};
-
-    async function fetchQr(showFeedback = false) {
-      try {
-        const res = await fetch('/api/whatsapp/qr', { headers });
-        if (res.status === 401) {
-          document.getElementById('loadingText').textContent = 'Please log in from the mobile app first to get your QR code.';
-          return;
-        }
-        const json = await res.json();
-        const data = json.data;
-        const badge = document.getElementById('statusBadge');
-        const statusText = document.getElementById('statusText');
-        const qrImage = document.getElementById('qrImage');
-        const loadingText = document.getElementById('loadingText');
-        if (data.isConnected) {
-          badge.className = 'badge online';
-          statusText.textContent = 'Connected';
-          loadingText.style.display = 'block';
-          loadingText.innerHTML = '<b style="color: #00A884;">WhatsApp Connected!</b><br>Phone: ' + (data.phone || 'Active');
-          qrImage.style.display = 'none';
-        } else if (data.qrDataUrl) {
-          badge.className = 'badge waiting';
-          statusText.textContent = 'Waiting for Scan';
-          qrImage.src = data.qrDataUrl;
-          qrImage.style.display = 'block';
-          loadingText.style.display = 'none';
-        } else {
-          badge.className = 'badge offline';
-          statusText.textContent = data.status || 'Starting...';
-          loadingText.style.display = 'block';
-          loadingText.textContent = 'Generating QR code, please wait...';
-          qrImage.style.display = 'none';
-        }
-      } catch (err) {
-        console.error('Error fetching QR:', err);
-      }
-    }
-    async function resetSession() {
-      if (!confirm('Are you sure you want to disconnect and clear your WhatsApp session?')) return;
-      try {
-        const res = await fetch('/api/whatsapp/restart?clean=true', { method: 'POST', headers });
-        const json = await res.json();
-        alert(json.message || 'Session reset initiated.');
-        fetchQr();
-      } catch (err) {
-        alert('Failed to reset session: ' + err.message);
-      }
-    }
-    fetchQr();
-    setInterval(fetchQr, 3000);
-  </script>
-</body>
-</html>
-  `;
-  res.setHeader('Content-Type', 'text/html');
-  res.send(html);
-}
-
-async function debugChats(req, res, next) {
+// GET /api/whatsapp/accounts/:id/call-logs (Personal WhatsApp accounts only)
+async function getAccountCallLogs(req, res, next) {
   try {
-    const service = await getUserSession(req);
-    if (!service.client || !service.client.pupPage) {
-      return res.json({ success: false, message: 'Client or pupPage not ready' });
-    }
-    const safeChats = await service.getSafeChatList();
-    return res.json({ success: true, safeChatsCount: safeChats.length, top5Safe: safeChats.slice(0, 5) });
-  } catch (err) {
-    return res.status(500).json({ success: false, error: err.message });
-  }
-}
+    const { account, error } = await verifyAccountAccess(req, req.params.id);
+    if (error) return res.status(error.status).json({ success: false, message: error.message });
 
-async function debugMsgs(req, res) {
-  try {
-    const service = await getUserSession(req);
-    const { jid = '' } = req.query;
-    if (!service.client || !service.client.pupPage) {
-      return res.json({ success: false, error: 'No pupPage' });
-    }
-
-    const diag = await service.client.pupPage.evaluate(async (targetJid) => {
-      try {
-        let chat = null;
-        if (window.WWebJS && window.WWebJS.getChat) {
-          try {
-            chat = await window.WWebJS.getChat(targetJid, { getAsModel: false });
-          } catch (e) {
-            return { error: 'getChat failed: ' + e.message };
-          }
-        }
-        if (!chat) {
-          const chatCol = window.require ? window.require('WAWebCollections')?.Chat : null;
-          chat = chatCol?.get ? chatCol.get(targetJid) : null;
-        }
-        if (!chat) {
-          return { error: 'Chat not found in collection for JID ' + targetJid };
-        }
-
-        const initialMsgsCount = chat.msgs?.models?.length || (chat.msgs?.getModelsArray ? chat.msgs.getModelsArray().length : 0);
-
-        let loaderError = null;
-        let loadedResults = [];
-        const loader = window.require ? window.require('WAWebChatLoadMessages') : null;
-        if (loader && loader.loadEarlierMsgs) {
-          try {
-            for (let i = 0; i < 3; i++) {
-              const res = await loader.loadEarlierMsgs({ chat });
-              loadedResults.push({ loop: i, resCount: res?.length || 0 });
-              if (!res || !res.length) break;
-            }
-          } catch (le) {
-            loaderError = le.message || String(le);
-          }
-        }
-
-        const finalMsgsCount = chat.msgs?.models?.length || (chat.msgs?.getModelsArray ? chat.msgs.getModelsArray().length : 0);
-        const models = chat.msgs?.getModelsArray ? chat.msgs.getModelsArray() : (chat.msgs?.models || []);
-
-        return {
-          foundChat: true,
-          chatId: chat.id?._serialized,
-          initialMsgsCount,
-          finalMsgsCount,
-          hasLoader: !!loader,
-          loaderError,
-          loadedResults,
-          firstMsg: models[0] ? { id: models[0].id?._serialized, body: models[0].body?.slice(0, 50), t: models[0].t } : null,
-          lastMsg: models[models.length - 1] ? { id: models[models.length - 1].id?._serialized, body: models[models.length - 1].body?.slice(0, 50), t: models[models.length - 1].t } : null
-        };
-      } catch (err) {
-        return { error: err.message };
-      }
-    }, jid);
-
-    return res.json({ success: true, jid, diag });
-  } catch (err) {
-    return res.status(500).json({ success: false, error: err.message });
-  }
-}
-
-async function syncChatMessages(req, res) {
-  try {
-    const service = await getUserSession(req);
-    const userId = req.user.id;
-    const { convId = 1 } = req.query;
-    const [convRows] = await pool.execute('SELECT id, customer_id FROM conversations WHERE id = ? AND user_id = ?', [convId, userId]);
-    if (convRows.length === 0) return res.status(404).json({ success: false, message: 'Conversation not found for this user' });
-    const conversation = convRows[0];
-    const [custRows] = await pool.execute('SELECT id, whatsapp_jid FROM customers WHERE id = ?', [conversation.customer_id]);
-    if (custRows.length === 0 || !custRows[0].whatsapp_jid) {
-      return res.status(400).json({ success: false, message: 'Customer has no whatsapp_jid' });
-    }
-    const jid = custRows[0].whatsapp_jid;
-    const liveMsgs = await service.fetchMessagesForChat(jid, 60);
-    let inserted = 0;
-    for (const m of liveMsgs) {
-      const iso = new Date(m.timestamp * 1000).toISOString().slice(0, 19).replace('T', ' ');
-      const dir = m.fromMe ? 'outgoing' : 'incoming';
-      const safeMsgId = m.id ? String(m.id).slice(0, 191) : `wa_${m.timestamp}_${dir}`;
-      if (safeMsgId) {
-        const [exist] = await pool.execute('SELECT id, message_type FROM messages WHERE whatsapp_message_id = ? AND user_id = ? LIMIT 1', [safeMsgId, userId]);
-        if (exist.length === 0) {
-          const metadataJson = m.metadata ? JSON.stringify(m.metadata) : null;
-          await pool.execute(
-            `INSERT INTO messages (conversation_id, customer_id, direction, message, whatsapp_message_id, message_type, whatsapp_timestamp, status, created_at, user_id, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            [convId, conversation.customer_id, dir, m.body || '', safeMsgId, m.type || 'text', m.timestamp * 1000, m.status || 'delivered', iso, userId, metadataJson]
-          );
-          inserted++;
-        } else if (m.type === 'call' && m.metadata) {
-          // Historical sync finds the same call and updates the existing record
-          const metadataJson = JSON.stringify(m.metadata);
-          await pool.execute(
-            'UPDATE messages SET metadata = ?, message = ?, message_type = ? WHERE id = ?',
-            [metadataJson, m.body || '', m.type, exist[0].id]
-          );
-        }
-      }
-    }
-    return res.json({ success: true, convId, liveCount: liveMsgs.length, inserted });
-  } catch (err) {
-    return res.status(500).json({ success: false, error: err.message });
-  }
-}
-
-// POST /api/whatsapp/log-call
-async function logCall(req, res) {
-  try {
-    const userId = req.user.id;
-    const { conversationId, phoneNumber, mediaType = 'voice', callType = 'outgoing' } = req.body;
-    if (!phoneNumber) {
-      return res.status(400).json({ success: false, message: 'phoneNumber is required' });
-    }
-
-    const service = sessionManager.getSession(userId);
-    if (service) {
-      await service.logCallDirectly({ conversationId, phoneNumber, mediaType, callType });
-    } else {
-      const rawNumber = String(phoneNumber).replace(/[^0-9]/g, '');
-      const formattedPhone = rawNumber.startsWith('+') ? rawNumber : `+${rawNumber}`;
-      const mediaLabel = mediaType === 'video' ? 'video' : 'voice';
-      const callStatus = callType === 'missed' ? 'missed' : 'unknown';
-      const callMsgText = mediaLabel === 'video'
-        ? (callType === 'missed' ? '📹 Missed video call' : (callType === 'outgoing' ? '📹 Outgoing video call' : '📹 Video call'))
-        : (callType === 'missed' ? '📞 Missed voice call' : (callType === 'outgoing' ? '📞 Outgoing voice call' : '📞 Voice call'));
-
-      const safeCallId = `call_manual_${Date.now()}`;
-      const rawCallJson = JSON.stringify({
-        id: safeCallId,
-        from: formattedPhone,
-        timestamp: Math.floor(Date.now() / 1000),
-        isGroup: false,
-        isVideo: mediaLabel === 'video',
-        isVideoCall: mediaLabel === 'video',
-        fromMe: callType === 'outgoing',
-        status: callStatus
+    if (account.account_type === 'TEAM') {
+      return res.status(200).json({
+        success: true,
+        isConnected: false,
+        disabled: true,
+        message: 'Call functionality is disabled on Team WhatsApp accounts.',
+        data: []
       });
-
-      await pool.execute(
-        `INSERT INTO whatsapp_calls (call_id, phone_number, customer_name, call_type, media_type, duration, raw_call, created_at, user_id)
-         VALUES (?, ?, ?, ?, ?, NULL, ?, NOW(), ?)`,
-        [safeCallId, formattedPhone, 'Customer', callType === 'missed' ? 'missed' : (callType === 'incoming' ? 'incoming' : 'outgoing'), mediaLabel, rawCallJson, userId]
-      );
-
-      if (conversationId) {
-        const [convRows] = await pool.execute(
-          'SELECT customer_id FROM conversations WHERE id = ? AND user_id = ? LIMIT 1',
-          [conversationId, userId]
-        );
-        if (convRows.length > 0) {
-          const customerId = convRows[0].customer_id;
-          const nowMs = Date.now();
-          const utcStr = new Date(nowMs).toISOString().slice(0, 19).replace('T', ' ');
-          const metadataJson = JSON.stringify({
-            isCall: true,
-            status: callStatus,
-            callType: callType === 'incoming' ? 'incoming' : 'outgoing',
-            mediaType: mediaLabel,
-            duration: null,
-            whatsappCallId: safeCallId
-          });
-
-          await pool.execute(
-            `INSERT INTO messages (conversation_id, customer_id, direction, message, whatsapp_message_id, message_type, whatsapp_timestamp, status, created_at, user_id, metadata)
-             VALUES (?, ?, ?, ?, ?, 'call', ?, 'delivered', ?, ?, ?)`,
-            [conversationId, customerId, callType === 'incoming' ? 'incoming' : 'outgoing', callMsgText, safeCallId, nowMs, utcStr, userId, metadataJson]
-          );
-          await pool.execute(
-            'UPDATE conversations SET last_message_at = ? WHERE id = ?',
-            [utcStr, conversationId]
-          );
-        }
-      }
     }
 
-    return res.status(200).json({ success: true, message: 'Call logged successfully' });
+    const limit = parseInt(req.query.limit, 10) || 100;
+    const service = await sessionManager.getOrCreateSession(account.id, account);
+    const isConnected = !!(service && service.isConnected) || account.status === 'online';
+
+    const callLogs = service ? await service.getCallLogs(limit) : [];
+
+    return res.status(200).json({
+      success: true,
+      isConnected: isConnected || callLogs.length > 0,
+      data: callLogs
+    });
   } catch (err) {
-    console.error('[WhatsAppController] logCall error:', err.message);
-    return res.status(500).json({ success: false, error: err.message });
+    next(err);
+  }
+}
+
+// -----------------------------------------------------------------------------
+// BACKWARD COMPATIBILITY ENDPOINTS (Auto-resolves to user's first accessible account)
+// -----------------------------------------------------------------------------
+async function getDefaultAccount(req) {
+  const userId = req.user.id;
+  const userRole = req.user.role;
+  const accounts = await WhatsAppAccount.findAccessibleByUser(userId, userRole);
+  if (accounts.length === 0) {
+    // Auto-create personal account for user
+    const sessionId = `session-account-user-${userId}-${Date.now()}`;
+    return WhatsAppAccount.create({
+      accountName: `${req.user.name || 'Personal'} WhatsApp`,
+      accountType: 'PERSONAL',
+      ownerUserId: userId,
+      createdByUserId: userId,
+      sessionId
+    });
+  }
+  return accounts[0];
+}
+
+async function getStatus(req, res, next) {
+  try {
+    const account = await getDefaultAccount(req);
+    req.params.id = account.id;
+    return getAccountStatus(req, res, next);
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function getQr(req, res, next) {
+  try {
+    const account = await getDefaultAccount(req);
+    req.params.id = account.id;
+    return getAccountQr(req, res, next);
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function getCallLogs(req, res, next) {
+  try {
+    const account = await getDefaultAccount(req);
+    req.params.id = account.id;
+    return getAccountCallLogs(req, res, next);
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function restartSession(req, res, next) {
+  try {
+    const account = await getDefaultAccount(req);
+    req.params.id = account.id;
+    return restartAccountSession(req, res, next);
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function syncChats(req, res, next) {
+  try {
+    const account = await getDefaultAccount(req);
+    req.params.id = account.id;
+    return syncAccountChats(req, res, next);
+  } catch (err) {
+    next(err);
   }
 }
 
 module.exports = {
+  verifyAccountAccess,
+  getAccounts,
+  createAccount,
+  getAccountDetails,
+  deleteAccount,
+  disconnectAccount,
+  getAccountMembers,
+  updateAccountMembers,
+  getAccountStatus,
+  getAccountQr,
+  restartAccountSession,
+  syncAccountChats,
+  getAccountCallLogs,
   getStatus,
   getQr,
   getCallLogs,
-  inspectQrPage,
   restartSession,
-  syncChats,
-  getQrPage,
-  debugChats,
-  debugMsgs,
-  syncChatMessages,
-  logCall
+  syncChats
 };

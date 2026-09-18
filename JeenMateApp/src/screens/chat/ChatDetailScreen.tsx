@@ -2,6 +2,7 @@ import React, { useEffect, useState, useRef } from 'react';
 import {
   View,
   Text,
+  Image,
   FlatList,
   ScrollView,
   TextInput,
@@ -401,25 +402,23 @@ export const ChatDetailScreen: React.FC = () => {
 
     // Priority 1: Structured metadata from API
     if (metadata && metadata.isCall) {
-      const isVideo = metadata.mediaType === 'video' || lowerText.includes('video') || rawText.includes('📹');
-      const isMissed = metadata.status === 'missed' || lowerText.includes('missed') || lowerText.includes('tap to call back') || lowerText.includes('no answer');
-      const isRejected = !isMissed && (metadata.status === 'rejected' || lowerText.includes('declined') || lowerText.includes('rejected'));
-      const isAnswered = metadata.status === 'answered' || (!isMissed && !isRejected && metadata.status !== 'unknown');
-      const isUnknown = metadata.status === 'unknown' && !isMissed && !isRejected;
       const isOutgoing = metadata.callType === 'outgoing' || isStaff || lowerText.includes('outgoing');
+      const isVideo = metadata.mediaType === 'video' || lowerText.includes('video') || rawText.includes('📹');
+      const isMissed = metadata.status === 'missed' || (!isOutgoing && metadata.status === 'unknown' && (!metadata.duration || metadata.duration <= 0)) || lowerText.includes('missed') || lowerText.includes('tap to call back') || lowerText.includes('no answer');
+      const isRejected = !isMissed && (metadata.status === 'rejected' || lowerText.includes('declined') || lowerText.includes('rejected'));
+      const isAnswered = metadata.status === 'answered' || (metadata.duration !== null && metadata.duration !== undefined && metadata.duration > 0);
+      const isUnknown = !isMissed && !isRejected && !isAnswered;
 
       let title = '';
       if (isVideo) {
         if (isMissed) title = 'Missed video call';
         else if (isRejected) title = 'Declined video call';
         else if (isOutgoing) title = 'Outgoing video call';
-        else if (isUnknown) title = 'Incoming video call';
         else title = 'Video call';
       } else {
         if (isMissed) title = 'Missed voice call';
         else if (isRejected) title = 'Declined voice call';
         else if (isOutgoing) title = 'Outgoing voice call';
-        else if (isUnknown) title = 'Incoming voice call';
         else title = 'Voice call';
       }
 
@@ -428,15 +427,12 @@ export const ChatDetailScreen: React.FC = () => {
         subtitle = 'Tap to call back';
       } else if (isRejected) {
         subtitle = 'Declined';
-      } else if (isUnknown) {
-        subtitle = isOutgoing ? 'Outgoing' : 'Ringing';
       } else if (metadata.duration !== null && metadata.duration !== undefined && metadata.duration > 0) {
         subtitle = formatCallDuration(metadata.duration);
-      } else if (isAnswered) {
-        const durMatch = rawText.match(/(\d+\s*(?:sec|min|s|m)|\d+:\d{2})/i);
-        if (durMatch) {
-          subtitle = durMatch[1];
-        }
+      } else if (isOutgoing) {
+        subtitle = 'No answer';
+      } else {
+        subtitle = '';
       }
 
       return {
@@ -665,6 +661,10 @@ export const ChatDetailScreen: React.FC = () => {
       );
     }
 
+    const isImage = item.message_type === 'image' || !!item.metadata?.isImage || !!item.metadata?.mediaUrl || rawText.startsWith('data:image') || rawText.startsWith('/9j/');
+    const imageUri = item.metadata?.mediaUrl || (rawText.startsWith('data:image') ? rawText : (rawText.startsWith('/9j/') ? `data:image/jpeg;base64,${rawText}` : null));
+    const captionText = item.metadata?.caption || (!rawText.startsWith('data:image') && !rawText.startsWith('/9j/') && rawText !== '📷 Photo' && rawText !== 'Images' && rawText !== 'Image' && rawText !== '🖼️ Image' ? contentText : '');
+
     const displayText = getDisplayText(contentText);
 
     return (
@@ -678,6 +678,7 @@ export const ChatDetailScreen: React.FC = () => {
           style={[
             styles.bubbleContainer,
             isStaff ? styles.bubbleStaff : styles.bubbleCustomer,
+            isImage && styles.bubbleImageContainer,
           ]}
         >
           {/* Sender indicator on top left side of Create Task */}
@@ -690,7 +691,7 @@ export const ChatDetailScreen: React.FC = () => {
               {/* One-Tap 📌 Create Task button directly on customer message */}
               <TouchableOpacity
                 style={styles.taskConvertBtn}
-                onPress={() => handleOpenCreateTask(contentText, item.timestamp, 'WhatsApp Chat')}
+                onPress={() => handleOpenCreateTask(captionText || displayText, item.timestamp, isImage ? 'WhatsApp Image' : 'WhatsApp Chat')}
                 activeOpacity={0.7}
               >
                 <Text style={styles.taskConvertBtnText}>📌 Create Task</Text>
@@ -698,9 +699,33 @@ export const ChatDetailScreen: React.FC = () => {
             </View>
           ) : null}
 
-          <Text style={[styles.bubbleText, isStaff ? styles.textWhite : styles.textDark]}>
-            {displayText}
-          </Text>
+          {isImage ? (
+            <View style={styles.mediaContentBox}>
+              {imageUri ? (
+                <Image
+                  source={{ uri: imageUri }}
+                  style={styles.chatImagePreview}
+                  resizeMode="cover"
+                />
+              ) : (
+                <View style={styles.placeholderImageBox}>
+                  <Icon name="image" size={36} color={isStaff ? '#FFFFFF' : COLORS.primary} />
+                  <Text style={[styles.placeholderImageLabel, isStaff ? styles.textWhite : styles.textDark]}>
+                    Photo
+                  </Text>
+                </View>
+              )}
+              {captionText ? (
+                <Text style={[styles.bubbleText, styles.mediaCaptionText, isStaff ? styles.textWhite : styles.textDark]}>
+                  {captionText}
+                </Text>
+              ) : null}
+            </View>
+          ) : (
+            <Text style={[styles.bubbleText, isStaff ? styles.textWhite : styles.textDark]}>
+              {displayText}
+            </Text>
+          )}
 
           <View style={styles.bubbleMeta}>
             <Text style={[styles.bubbleTime, isStaff ? styles.timeStaff : styles.timeCustomer]}>
@@ -762,6 +787,10 @@ export const ChatDetailScreen: React.FC = () => {
           ref={flatListRef}
           data={groupedMessages}
           keyExtractor={(item) => item.id}
+          initialNumToRender={20}
+          maxToRenderPerBatch={15}
+          windowSize={9}
+          removeClippedSubviews={Platform.OS === 'android'}
           renderItem={({ item }) => {
             if (item.type === 'date_header') {
               return (
@@ -1297,6 +1326,39 @@ const styles = StyleSheet.create({
   bubbleText: {
     fontSize: 14,
     lineHeight: 19,
+  },
+  bubbleImageContainer: {
+    paddingHorizontal: 6,
+    paddingTop: 6,
+    paddingBottom: 6,
+  },
+  mediaContentBox: {
+    borderRadius: RADIUS.md,
+    overflow: 'hidden',
+    marginBottom: 4,
+  },
+  chatImagePreview: {
+    width: 220,
+    height: 180,
+    borderRadius: RADIUS.md,
+    backgroundColor: '#E2E8F0',
+  },
+  placeholderImageBox: {
+    width: 200,
+    height: 120,
+    borderRadius: RADIUS.md,
+    backgroundColor: 'rgba(0,0,0,0.06)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+  },
+  placeholderImageLabel: {
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  mediaCaptionText: {
+    marginTop: 6,
+    paddingHorizontal: 4,
   },
   textWhite: {
     color: COLORS.bgWhite,

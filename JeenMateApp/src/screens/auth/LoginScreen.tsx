@@ -16,20 +16,24 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useAuthStore } from '../../store/authStore';
 import { COLORS, SPACING, RADIUS } from '../../constants/theme';
 import { Icon } from '../../components/common/Icon';
+import { JeenMateLogo } from '../../components/common/JeenMateLogo';
 
 export const LoginScreen: React.FC = () => {
   const insets = useSafeAreaInsets();
-  const { login, serverUrl, setServerUrl, testServerConnection, isLoading, loginError } = useAuthStore();
+  const { login, serverUrl, setServerUrl, testServerConnection, isLoading, isLoginSuccess, loginError } = useAuthStore();
 
   const [email, setEmail] = useState('admin@support.com');
   const [password, setPassword] = useState('Admin@12345');
   const [showPassword, setShowPassword] = useState(false);
+  const [focusedField, setFocusedField] = useState<'email' | 'password' | null>(null);
 
   // Server settings modal state
   const [showServerModal, setShowServerModal] = useState(false);
   const [customUrl, setCustomUrl] = useState(serverUrl);
   const [testStatus, setTestStatus] = useState<string | null>(null);
   const [isTesting, setIsTesting] = useState(false);
+
+  const isBusy = isLoading || isLoginSuccess;
 
   const handleLogin = async () => {
     if (!email.trim() || !password) {
@@ -66,13 +70,16 @@ export const LoginScreen: React.FC = () => {
       <ScrollView
         contentContainerStyle={[
           styles.scrollContent,
-          { paddingTop: Math.max(insets.top, 20) + 24 },
+          { paddingTop: Math.max(insets.top, 20) + 16 },
         ]}
         keyboardShouldPersistTaps="handled"
         showsVerticalScrollIndicator={false}
       >
         {/* Brand Header */}
         <View style={styles.brandContainer}>
+          <View style={styles.logoWrapper}>
+            <JeenMateLogo size={76} />
+          </View>
           <Text style={styles.brandTitle}>jeenMate</Text>
           <Text style={styles.brandSubtitle}>
             Connect Smarter. Work Better.
@@ -82,6 +89,14 @@ export const LoginScreen: React.FC = () => {
         {/* Login Card */}
         <View style={styles.card}>
           <Text style={styles.cardTitle}>Sign In</Text>
+
+          {/* Success Message */}
+          {isLoginSuccess ? (
+            <View style={styles.successBox}>
+              <Icon name="check" size={16} color="#059669" strokeWidth={2.5} />
+              <Text style={styles.successText}>Sign In Successful!</Text>
+            </View>
+          ) : null}
 
           {/* Error Message */}
           {loginError ? (
@@ -93,12 +108,22 @@ export const LoginScreen: React.FC = () => {
           {/* Email Field */}
           <View style={styles.inputGroup}>
             <Text style={styles.inputLabel}>Email Id</Text>
-            <View style={styles.inputWrapper}>
+            <View
+              style={[
+                styles.inputWrapper,
+                focusedField === 'email' && styles.inputWrapperFocused,
+                isBusy && styles.inputWrapperDisabled,
+              ]}
+            >
               <View style={styles.inputIcon}>
-                <Icon name="mail" size={18} color={COLORS.primary} />
+                <Icon
+                  name="mail"
+                  size={18}
+                  color={focusedField === 'email' ? COLORS.peacockDark : (isBusy ? COLORS.textMuted : COLORS.textMuted)}
+                />
               </View>
               <TextInput
-                style={styles.input}
+                style={[styles.input, isBusy && styles.inputDisabled]}
                 placeholder="admin@support.com"
                 placeholderTextColor={COLORS.textSubtle}
                 keyboardType="email-address"
@@ -106,6 +131,9 @@ export const LoginScreen: React.FC = () => {
                 autoCorrect={false}
                 value={email}
                 onChangeText={setEmail}
+                onFocus={() => setFocusedField('email')}
+                onBlur={() => setFocusedField(null)}
+                editable={!isBusy}
               />
             </View>
           </View>
@@ -113,23 +141,37 @@ export const LoginScreen: React.FC = () => {
           {/* Password Field with Eye Toggle */}
           <View style={styles.inputGroup}>
             <Text style={styles.inputLabel}>Password</Text>
-            <View style={styles.inputWrapper}>
+            <View
+              style={[
+                styles.inputWrapper,
+                focusedField === 'password' && styles.inputWrapperFocused,
+                isBusy && styles.inputWrapperDisabled,
+              ]}
+            >
               <View style={styles.inputIcon}>
-                <Icon name="lock" size={18} color={COLORS.primary} />
+                <Icon
+                  name="lock"
+                  size={18}
+                  color={focusedField === 'password' ? COLORS.peacockDark : (isBusy ? COLORS.textMuted : COLORS.textMuted)}
+                />
               </View>
               <TextInput
-                style={[styles.input, { paddingRight: 48 }]}
+                style={[styles.input, { paddingRight: 48 }, isBusy && styles.inputDisabled]}
                 placeholder="Enter password"
                 placeholderTextColor={COLORS.textSubtle}
                 secureTextEntry={!showPassword}
                 autoCapitalize="none"
                 value={password}
                 onChangeText={setPassword}
+                onFocus={() => setFocusedField('password')}
+                onBlur={() => setFocusedField(null)}
+                editable={!isBusy}
               />
               <TouchableOpacity
                 style={styles.eyeButton}
                 onPress={() => setShowPassword(!showPassword)}
                 hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                disabled={isBusy}
               >
                 <Icon
                   name={showPassword ? 'eye' : 'eye-off'}
@@ -142,13 +184,25 @@ export const LoginScreen: React.FC = () => {
 
           {/* Sign In Button */}
           <TouchableOpacity
-            style={[styles.submitButton, isLoading && styles.submitButtonDisabled]}
+            style={[
+              styles.submitButton,
+              isLoading && styles.submitButtonDisabled,
+              isLoginSuccess && styles.submitButtonSuccess,
+            ]}
             onPress={handleLogin}
-            disabled={isLoading}
+            disabled={isBusy}
             activeOpacity={0.85}
           >
-            {isLoading ? (
-              <ActivityIndicator color={COLORS.bgWhite} size="small" />
+            {isLoginSuccess ? (
+              <View style={styles.loadingButtonRow}>
+                <Icon name="check" size={20} color={COLORS.bgWhite} strokeWidth={2.5} />
+                <Text style={styles.submitButtonText}>Sign In Successful!</Text>
+              </View>
+            ) : isLoading ? (
+              <View style={styles.loadingButtonRow}>
+                <ActivityIndicator color={COLORS.bgWhite} size="small" />
+                <Text style={styles.submitButtonText}>Signing In...</Text>
+              </View>
             ) : (
               <Text style={styles.submitButtonText}>Sign In</Text>
             )}
@@ -262,8 +316,13 @@ const styles = StyleSheet.create({
   },
   brandContainer: {
     alignItems: 'center',
-    marginTop: SPACING.xxxl,
+    marginTop: SPACING.xl,
     marginBottom: SPACING.lg,
+  },
+  logoWrapper: {
+    marginBottom: SPACING.md,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   badgePill: {
     flexDirection: 'row',
@@ -303,19 +362,28 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.bgWhite,
     borderRadius: RADIUS.xl,
     padding: SPACING.xl,
-    borderWidth: 1,
-    borderColor: COLORS.borderColor,
-    shadowColor: COLORS.shadowColor,
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.05,
-    shadowRadius: 16,
-    elevation: 3,
   },
   cardTitle: {
     fontSize: 20,
     fontWeight: '700',
     color: COLORS.textDark,
     marginBottom: SPACING.lg,
+  },
+  successBox: {
+    backgroundColor: COLORS.greenLight,
+    padding: 12,
+    borderRadius: RADIUS.md,
+    marginBottom: SPACING.md,
+    borderLeftWidth: 4,
+    borderLeftColor: COLORS.greenDark,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  successText: {
+    color: COLORS.greenDark,
+    fontSize: 13,
+    fontWeight: '600',
   },
   errorBox: {
     backgroundColor: '#FEE2E2',
@@ -344,9 +412,19 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     backgroundColor: COLORS.inputBg,
     borderRadius: RADIUS.md,
-    borderWidth: 1,
-    borderColor: COLORS.borderColor,
+    borderWidth: 1.5,
+    borderColor: '#8AAEB2',
     position: 'relative',
+  },
+  inputWrapperFocused: {
+    borderColor: COLORS.peacockDark,
+    borderWidth: 1.5,
+    backgroundColor: '#FFFFFF',
+  },
+  inputWrapperDisabled: {
+    backgroundColor: COLORS.inputDisabledBg,
+    borderColor: COLORS.inputBorder,
+    opacity: 0.8,
   },
   inputIcon: {
     paddingHorizontal: 12,
@@ -356,6 +434,9 @@ const styles = StyleSheet.create({
     height: 48,
     fontSize: 15,
     color: COLORS.textDark,
+  },
+  inputDisabled: {
+    color: COLORS.textPlaceholder,
   },
   eyeButton: {
     position: 'absolute',
@@ -369,7 +450,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     marginTop: SPACING.sm,
-    shadowColor: COLORS.primary,
+    shadowColor: COLORS.shadow,
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.25,
     shadowRadius: 8,
@@ -377,6 +458,16 @@ const styles = StyleSheet.create({
   },
   submitButtonDisabled: {
     opacity: 0.7,
+  },
+  submitButtonSuccess: {
+    backgroundColor: COLORS.greenDark,
+    shadowColor: COLORS.shadow,
+  },
+  loadingButtonRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
   },
   submitButtonText: {
     color: COLORS.bgWhite,

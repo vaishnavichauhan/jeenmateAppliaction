@@ -6,8 +6,10 @@ async function getTasks(req, res, next) {
     const { status, customerId, search } = req.query;
     const userId = req.user?.id;
 
-    const tasks = await Task.findAll({ status, customerId, search, userId });
-    const counts = await Task.getCounts(userId);
+    const [tasks, counts] = await Promise.all([
+      Task.findAll({ status, customerId, search, userId }),
+      Task.getCounts(userId)
+    ]);
 
     return res.status(200).json({
       success: true,

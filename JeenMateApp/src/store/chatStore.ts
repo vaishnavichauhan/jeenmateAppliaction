@@ -4,12 +4,17 @@ import apiClient from '../services/api';
 import { getSocket } from '../services/socket';
 
 export interface CallMetadata {
-  isCall: boolean;
-  status: 'unknown' | 'answered' | 'missed' | 'rejected';
-  callType: 'incoming' | 'outgoing';
-  mediaType: 'voice' | 'video';
-  duration: number | null;
+  isCall?: boolean;
+  status?: 'unknown' | 'answered' | 'missed' | 'rejected' | string;
+  callType?: 'incoming' | 'outgoing' | string;
+  mediaType?: 'voice' | 'video' | string;
+  duration?: number | null;
   whatsappCallId?: string | null;
+  isImage?: boolean;
+  mediaUrl?: string | null;
+  thumbnail?: string | null;
+  caption?: string | null;
+  [key: string]: any;
 }
 
 export interface ChatMessage {
@@ -56,7 +61,7 @@ interface ChatState {
 
   clearMessages: () => void;
   resetChatState: () => Promise<void>;
-  fetchConversations: () => Promise<void>;
+  fetchConversations: (accountId?: number) => Promise<void>;
   fetchMessages: (conversationId: string) => Promise<void>;
   fetchOlderMessages: (conversationId: string) => Promise<number>;
   sendMessage: (conversationId: string, text: string) => Promise<boolean>;
@@ -185,35 +190,77 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set({ syncStatus });
   },
 
-  fetchConversations: async () => {
-    try {
+  fetchConversations: async (accountId?: number) => {
+    const targetAccountId = accountId || require('./whatsappStore').useWhatsAppStore.getState().selectedAccountId;
+    const cacheKey = targetAccountId ? `${STORAGE_KEY_CONVS}_acc_${targetAccountId}` : STORAGE_KEY_CONVS;
+    
+    // 1. Load from cache immediately if memory is empty for 0ms instant display
+    if (get().conversations.length === 0) {
+      try {
+        const cached = await AsyncStorage.getItem(cacheKey);
+        if (cached) {
+          const parsed = JSON.parse(cached).filter((c: any) => !c.id?.startsWith('conv_00'));
+          if (parsed.length > 0 && get().conversations.length === 0) {
+            set({ conversations: sortConversations(parsed) });
+          }
+        }
+      } catch (_) {}
+    }
+
+    const hasData = get().conversations.length > 0;
+    if (!hasData) {
       set({ isLoading: true });
-      const res = await apiClient.get('/api/conversations');
+    }
+
+    try {
+      const res = await apiClient.get('/api/conversations', {
+        params: targetAccountId ? { accountId: targetAccountId } : {},
+      });
       if (res.data && res.data.success) {
         const sorted = sortConversations(res.data.data);
-        console.log(`[ChatStore] Conversations fetched: ${sorted.length} | syncStatus: ${get().syncStatus}`);
+        console.log(`[ChatStore] Conversations fetched for account ${targetAccountId}: ${sorted.length}`);
         set({ conversations: sorted, isLoading: false });
-        await AsyncStorage.setItem(STORAGE_KEY_CONVS, JSON.stringify(sorted));
+        await AsyncStorage.setItem(cacheKey, JSON.stringify(sorted));
         return;
       }
     } catch (e) {
-      console.log('[ChatStore] Loading cached conversations');
-      try {
-        const cached = await AsyncStorage.getItem(STORAGE_KEY_CONVS);
-        if (cached) {
-          const parsed = JSON.parse(cached).filter((c: any) => !c.id?.startsWith('conv_00'));
-          set({ conversations: sortConversations(parsed) });
-        }
-      } catch (err) { }
+      console.log(`[ChatStore] Error fetching conversations for account ${targetAccountId}`);
+      if (get().conversations.length === 0) {
+        try {
+          const cached = await AsyncStorage.getItem(cacheKey);
+          if (cached) {
+            const parsed = JSON.parse(cached).filter((c: any) => !c.id?.startsWith('conv_00'));
+            set({ conversations: sortConversations(parsed) });
+          }
+        } catch (_) {}
+      }
     } finally {
       set({ isLoading: false });
     }
   },
 
   fetchMessages: async (conversationId: string) => {
+    const msgCacheKey = `@jeenmate_msgs_${conversationId}`;
+    
+    // 1. Load cached messages immediately if available for instant display
+    if (get().messages.length === 0) {
+      try {
+        const cached = await AsyncStorage.getItem(msgCacheKey);
+        if (cached) {
+          const parsed = JSON.parse(cached);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            set({ messages: sortMessages(parsed), isLoading: false });
+          }
+        }
+      } catch (_) {}
+    }
+
+    const hasCached = get().messages.length > 0;
+    if (!hasCached) {
+      set({ isLoading: true });
+    }
+
     try {
-      // Clear previous conversation messages immediately and show loader
-      set({ isLoading: true, messages: [] });
       const res = await apiClient.get(`/api/conversations/${conversationId}/messages`, {
         params: { limit: 30 },
       });
@@ -256,6 +303,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
           hasMoreMessages: res.data.hasMore !== false,
           isLoading: false,
         });
+
+        AsyncStorage.setItem(msgCacheKey, JSON.stringify(sortedMsgs)).catch(() => {});
 
         // Update conversation last_message and clear unread count in conversations list
         const lastM = sortedMsgs.length > 0 ? sortedMsgs[sortedMsgs.length - 1] : null;
@@ -415,9 +464,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   syncWhatsAppChats: async () => {
     set({ isSyncing: true, syncStatus: 'syncing' });
+    const selectedAccountId = require('./whatsappStore').useWhatsAppStore.getState().selectedAccountId;
+    const syncUrl = selectedAccountId ? `/api/whatsapp/accounts/${selectedAccountId}/sync` : '/api/whatsapp/sync';
     try {
-      const res = await apiClient.post('/api/whatsapp/sync');
-      await get().fetchConversations();
+      const res = await apiClient.post(syncUrl);
+      await get().fetchConversations(selectedAccountId);
       return { success: true, message: res.data?.message || 'Chats synced successfully!' };
     } catch (err: any) {
       set({ syncStatus: 'error' });
@@ -428,10 +479,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   setupSocketListeners: () => {
-    if (get().isSocketListening) return;
     const socket = getSocket();
 
     // 1. WhatsApp Sync Status Listener
+    socket.off('whatsapp_sync_status');
     socket.on('whatsapp_sync_status', (data: { userId?: number; status: WhatsAppSyncStatus; totalChats?: number; completed?: number }) => {
       if (data && data.status) {
         console.log(`[ChatStore:Socket] Sync status updated: ${data.status} (${data.completed || 0}/${data.totalChats || 0})`);
@@ -446,6 +497,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     });
 
     // 2. New Message Listener
+    socket.off('new_message');
     socket.on('new_message', (payload: { conversationId: string; message: ChatMessage }) => {
       const { activeConversation, conversations } = get();
       const rawMsg = payload.message;
@@ -512,6 +564,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     });
 
     // 3. Conversation Updated Listener (handles sync signals & individual conversation updates)
+    socket.off('conversation_updated');
     socket.on('conversation_updated', (payload: any) => {
       if (!payload) return;
 
@@ -537,6 +590,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
     });
 
+    socket.off('whatsapp_status');
     socket.on('whatsapp_status', (statusData: { status: 'online' | 'waiting' | 'offline' }) => {
       if (statusData?.status) {
         set({ whatsappStatus: statusData.status });

@@ -1,4 +1,4 @@
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -7,112 +7,543 @@ import {
   TouchableOpacity,
   Image,
   ActivityIndicator,
-  Share,
   Alert,
-  Platform,
   Modal,
-  TextInput,
-  Clipboard,
+  Platform,
 } from 'react-native';
 import { useNavigation, useFocusEffect } from '@react-navigation/native';
-import { useWhatsAppStore } from '../../store/whatsappStore';
+import { useWhatsAppStore, WhatsAppAccount } from '../../store/whatsappStore';
+import { useAuthStore } from '../../store/authStore';
 import { COLORS, SPACING, RADIUS } from '../../constants/theme';
 import { Icon } from '../../components/common/Icon';
 import { Header } from '../../components/common/Header';
+import apiClient from '../../services/api';
+
+const QR_TIMEOUT_SECONDS = 75;
 
 export const LinkScreen: React.FC = () => {
   const navigation = useNavigation<any>();
+  const user = useAuthStore((s) => s.user);
+  const isAdmin = user?.role === 'admin';
+
   const {
-    isConnected,
-    status,
-    phone,
-    name,
-    qrDataUrl,
-    fetchStatus,
-    fetchQr,
-    regenerateQr,
-    resetSession,
-    getQrPageUrl,
-    isLoading,
-    isCheckingStatus,
-    hasCheckedStatus,
+    accounts,
+    selectedAccountId,
+    qrCodes,
+    fetchAccounts,
+    createAccount,
+    deleteAccount,
+    disconnectAccount,
+    fetchAccountQr,
+    restartAccount,
     setupSocketListeners,
-    isResetting,
+    hasLoadedAccounts,
+    isFetchingAccounts,
   } = useWhatsAppStore();
 
-  const qrPageUrl = getQrPageUrl();
+  // Reloading state per account ID
+  const [reloadingAccountId, setReloadingAccountId] = useState<number | null>(null);
 
-  // Check WhatsApp status and listen for live socket events and auto-refresh when scanning QR code
+  // Expanded/Collapsed state for connected account details
+  const [expandedAccountIds, setExpandedAccountIds] = useState<Record<number, boolean>>({});
+
+  const toggleExpand = (accountId: number) => {
+    setExpandedAccountIds((prev) => ({
+      ...prev,
+      [accountId]: !prev[accountId],
+    }));
+  };
+
+  // QR Scan Modal State
+  const [showScanModal, setShowScanModal] = useState(false);
+  const [scanModalType, setScanModalType] = useState<'PERSONAL' | 'TEAM'>('PERSONAL');
+  const [pendingAccountId, setPendingAccountId] = useState<number | null>(null);
+  const [isGeneratingQr, setIsGeneratingQr] = useState(false);
+  const [isQrReady, setIsQrReady] = useState(false);
+  const [isQrExpired, setIsQrExpired] = useState(false);
+  const [qrCountdown, setQrCountdown] = useState(QR_TIMEOUT_SECONDS);
+
+  // Refs for timers
+  const pollTimerRef = useRef<any>(null);
+  const countdownTimerRef = useRef<any>(null);
+
+  // Team Access Modal
+  const [showAccessModal, setShowAccessModal] = useState(false);
+  const [accessAccount, setAccessAccount] = useState<WhatsAppAccount | null>(null);
+  const [allUsers, setAllUsers] = useState<Array<{ id: number; name: string; email: string; role: string }>>([]);
+  const [selectedUserIds, setSelectedUserIds] = useState<number[]>([]);
+  const [isSavingAccess, setIsSavingAccess] = useState(false);
+
+  // Clear all modal timers
+  const clearAllTimers = () => {
+    if (pollTimerRef.current) {
+      clearInterval(pollTimerRef.current);
+      pollTimerRef.current = null;
+    }
+    if (countdownTimerRef.current) {
+      clearInterval(countdownTimerRef.current);
+      countdownTimerRef.current = null;
+    }
+  };
+
+  // On Focus: load accounts and setup live socket listeners
   useFocusEffect(
     useCallback(() => {
-      fetchStatus();
+      fetchAccounts();
       setupSocketListeners();
-
-      // If disconnected, poll status every 2.5s so scanning QR code immediately auto-refreshes to Connected
-      let pollTimer: any = null;
-      if (!isConnected) {
-        pollTimer = setInterval(() => {
-          if (!useWhatsAppStore.getState().isConnected) {
-            fetchStatus();
-          } else {
-            clearInterval(pollTimer);
-          }
-        }, 2500);
-      }
-
       return () => {
-        if (pollTimer) clearInterval(pollTimer);
+        clearAllTimers();
       };
-    }, [fetchStatus, setupSocketListeners, isConnected])
+    }, [])
   );
 
-  const [showUrlModal, setShowUrlModal] = useState(false);
-  const [copied, setCopied] = useState(false);
+  // Only show connected / valid accounts on the main screen list (unscanned pending sessions remain in the modal only)
+  const personalAccounts = React.useMemo(() => accounts.filter(
+    (a) => a.account_type === 'PERSONAL' && (a.status === 'online' || a.is_connected || a.phone_number)
+  ), [accounts]);
+  const teamAccounts = React.useMemo(() => accounts.filter(
+    (a) => a.account_type === 'TEAM' && (a.status === 'online' || a.is_connected || a.phone_number)
+  ), [accounts]);
 
-  const handleShareLink = async () => {
-    try {
-      await Share.share({
-        title: 'jeenMate WhatsApp QR Web Link',
-        message: `Open this link on your PC browser to scan and link WhatsApp:\n${qrPageUrl}`,
-        url: qrPageUrl,
+  // Open Scan Modal
+  const openScanModal = (type: 'PERSONAL' | 'TEAM', existingAccountId?: number) => {
+    clearAllTimers();
+    setScanModalType(type);
+    setPendingAccountId(existingAccountId || null);
+    setIsGeneratingQr(false);
+    setIsQrReady(!!existingAccountId);
+    setIsQrExpired(false);
+    setQrCountdown(QR_TIMEOUT_SECONDS);
+    setShowScanModal(true);
+
+    if (existingAccountId) {
+      startQrSession(existingAccountId);
+    }
+  };
+
+  // Start QR polling & expiration countdown for an account
+  const startQrSession = (accountId: number) => {
+    clearAllTimers();
+    setIsQrExpired(false);
+    setQrCountdown(QR_TIMEOUT_SECONDS);
+
+    // 1. Countdown timer
+    countdownTimerRef.current = setInterval(() => {
+      setQrCountdown((prev) => {
+        if (prev <= 1) {
+          clearInterval(countdownTimerRef.current);
+          countdownTimerRef.current = null;
+          clearInterval(pollTimerRef.current);
+          pollTimerRef.current = null;
+          setIsQrExpired(true);
+          return 0;
+        }
+        return prev - 1;
       });
-    } catch (e: any) {
-      Alert.alert('Share Failed', e.message);
-    }
+    }, 1000);
+
+    // 2. Polling timer
+    pollTimerRef.current = setInterval(async () => {
+      const res = await fetchAccountQr(accountId);
+      if (res.status === 'online') {
+        clearAllTimers();
+        await fetchAccounts();
+      }
+    }, 3000);
   };
 
-  const handleCopyLink = () => {
-    setShowUrlModal(true);
-    setCopied(false);
-  };
+  // Handle "Generate QR Code" button press inside modal
+  const handleGenerateQrInModal = async () => {
+    clearAllTimers();
+    setIsGeneratingQr(true);
+    setIsQrExpired(false);
+    setQrCountdown(QR_TIMEOUT_SECONDS);
 
-  const copyToClipboard = () => {
     try {
-      Clipboard.setString(qrPageUrl);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2500);
-    } catch (e) {
-      console.log('Clipboard error', e);
+      if (pendingAccountId) {
+        // Existing account: restart & fetch QR
+        await restartAccount(pendingAccountId);
+        await fetchAccountQr(pendingAccountId);
+        setIsQrReady(true);
+        startQrSession(pendingAccountId);
+      } else {
+        // Create new account automatically without asking for account name or type
+        const defaultName = scanModalType === 'PERSONAL'
+          ? (user?.name ? `${user.name} Personal` : 'Personal WhatsApp')
+          : 'Team WhatsApp';
+
+        const res = await createAccount(defaultName, scanModalType);
+        if (res.success && res.data) {
+          const newId = res.data.id;
+          setPendingAccountId(newId);
+          await restartAccount(newId);
+          await fetchAccountQr(newId);
+          setIsQrReady(true);
+          startQrSession(newId);
+        } else {
+          Alert.alert('Error', res.message || 'Failed to create QR session');
+        }
+      }
+    } finally {
+      setIsGeneratingQr(false);
     }
   };
 
-  const handleResetSession = () => {
+  // Handle Close / Cancel in Scan Modal (stops all background processes)
+  const handleCloseScanModal = async () => {
+    clearAllTimers();
+    const accId = pendingAccountId;
+
+    setShowScanModal(false);
+    setPendingAccountId(null);
+    setIsGeneratingQr(false);
+    setIsQrReady(false);
+    setIsQrExpired(false);
+
+    if (accId) {
+      try {
+        const pending = accounts.find((a) => a.id === accId);
+        // If the pending account was not connected yet, delete it from DB to stop backend Puppeteer
+        if (pending && !pending.is_connected && pending.status !== 'online' && !pending.phone_number) {
+          await deleteAccount(accId);
+        }
+      } catch (err) {
+        console.log('Error cleaning up unlinked QR session:', err);
+      }
+    }
+  };
+
+  // Auto-detect when pending account gets successfully scanned & connected -> Auto-close modal!
+  useEffect(() => {
+    if (showScanModal && pendingAccountId) {
+      const acc = accounts.find((a) => a.id === pendingAccountId);
+      if (acc && (acc.status === 'online' || acc.is_connected)) {
+        clearAllTimers();
+        setShowScanModal(false);
+        setPendingAccountId(null);
+        setIsGeneratingQr(false);
+        setIsQrReady(false);
+        setIsQrExpired(false);
+        Alert.alert('Success', 'WhatsApp account connected successfully!');
+      }
+    }
+  }, [accounts, showScanModal, pendingAccountId]);
+
+  // Handle Reload QR from button
+  const handleReloadQr = async (account: WhatsAppAccount) => {
+    setReloadingAccountId(account.id);
+    await restartAccount(account.id);
+    await fetchAccountQr(account.id);
+    setReloadingAccountId(null);
+  };
+
+  // Handle Disconnect
+  const handleDisconnect = (account: WhatsAppAccount) => {
     Alert.alert(
-      'Reset WhatsApp Session',
-      'Are you sure you want to disconnect and reset the WhatsApp Web session? You will need to scan a new QR code to reconnect.',
+      'Disconnect WhatsApp',
+      `Are you sure you want to disconnect ${account.account_name}? All WhatsApp chats and messages for this session will be cleared from the database, and you can scan a new QR code anytime.`,
       [
         { text: 'Cancel', style: 'cancel' },
         {
-          text: 'Reset Session',
+          text: 'Disconnect',
           style: 'destructive',
           onPress: async () => {
-            const result = await resetSession();
-            Alert.alert('Session Reset', result.message);
+            const res = await disconnectAccount(account.id);
+            if (!res.success) {
+              Alert.alert('Error', res.message);
+            }
           },
         },
       ]
     );
   };
+
+  // Handle Delete Account
+  const handleDelete = (account: WhatsAppAccount) => {
+    Alert.alert(
+      'Delete Account',
+      `Are you sure you want to permanently delete ${account.account_name}? All associated data and team permissions will be removed.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            const res = await deleteAccount(account.id);
+            if (!res.success) Alert.alert('Error', res.message);
+          },
+        },
+      ]
+    );
+  };
+
+  // Handle Open Manage Access Modal (Team accounts only)
+  const handleOpenAccessModal = async (account: WhatsAppAccount) => {
+    setAccessAccount(account);
+    setShowAccessModal(true);
+    try {
+      const [usersRes, membersRes] = await Promise.all([
+        apiClient.get('/api/auth/users'),
+        apiClient.get(`/api/whatsapp/accounts/${account.id}/members`),
+      ]);
+
+      if (usersRes.data?.data) {
+        setAllUsers(usersRes.data.data);
+      }
+      if (membersRes.data?.data) {
+        const memberIds = membersRes.data.data.map((m: any) => m.user_id);
+        setSelectedUserIds(memberIds);
+      }
+    } catch (err: any) {
+      console.log('Error fetching access data:', err);
+    }
+  };
+
+  const toggleUserAccess = (userId: number) => {
+    if (selectedUserIds.includes(userId)) {
+      setSelectedUserIds(selectedUserIds.filter((id) => id !== userId));
+    } else {
+      setSelectedUserIds([...selectedUserIds, userId]);
+    }
+  };
+
+  const handleSaveAccess = async () => {
+    if (!accessAccount) return;
+    setIsSavingAccess(true);
+    try {
+      const res = await apiClient.post(`/api/whatsapp/accounts/${accessAccount.id}/members`, {
+        user_ids: selectedUserIds,
+      });
+      if (res.data?.success) {
+        Alert.alert('Success', 'Team access permissions updated successfully');
+        setShowAccessModal(false);
+        await fetchAccounts();
+      } else {
+        Alert.alert('Error', res.data?.message || 'Failed to update access');
+      }
+    } catch (err: any) {
+      Alert.alert('Error', err.response?.data?.message || 'Failed to update access');
+    } finally {
+      setIsSavingAccess(false);
+    }
+  };
+
+  // Render Account Card on Main Link Screen
+  const renderAccountCard = (account: WhatsAppAccount) => {
+    const isConnected = account.status === 'online' || account.is_connected;
+    const isGlobalActive = selectedAccountId === account.id;
+    const isTeam = account.account_type === 'TEAM';
+    const isExpanded = !!expandedAccountIds[account.id];
+
+    const displayName = account.whatsapp_name || (isTeam ? account.account_name : (user?.name || 'Personal WhatsApp'));
+    const displayNumber = account.phone_number ? `+${account.phone_number.replace('+', '')}` : 'Connected (Online)';
+
+    // Team Assigned Members formatting
+    const assignedMembersList: string[] = isTeam
+      ? (account.members && account.members.length > 0
+          ? (account.members.map((m) => m.name).filter(Boolean) as string[])
+          : [account.creator_name || 'Support Admin'])
+      : [];
+    const uniqueAssigned = Array.from(new Set(assignedMembersList));
+
+    return (
+      <View key={account.id} style={styles.card}>
+        {isConnected ? (
+          /* ======================================================== */
+          /* CONNECTED STATE (COLLAPSIBLE)                            */
+          /* ======================================================== */
+          <View>
+            {/* COLLAPSIBLE SUMMARY HEADER */}
+            <TouchableOpacity
+              style={styles.summaryHeaderRow}
+              onPress={() => toggleExpand(account.id)}
+              activeOpacity={0.7}
+            >
+              <View style={styles.summaryLeftGroup}>
+                <View style={styles.whatsappIconCircle}>
+                  <Icon name="whatsapp" size={20} color={COLORS.whatsappGreen} />
+                </View>
+                <View style={styles.summaryInfoCol}>
+                  <View style={styles.nameBadgeRow}>
+                    <Text style={styles.connectedNameText} numberOfLines={1}>
+                      {displayName}
+                    </Text>
+                    {/* {isGlobalActive && (
+                      <View style={styles.miniActiveBadge}>
+                        <Icon name="check" size={10} color="#059669" strokeWidth={3} />
+                        <Text style={styles.miniActiveBadgeText}>Active</Text>
+                      </View>
+                    )} */}
+                  </View>
+                  <Text style={styles.connectedNumberText} numberOfLines={1}>
+                    {displayNumber}
+                  </Text>
+                  {isTeam && (
+                    <View style={styles.teamAssignedSummaryRow}>
+                      <Text style={styles.teamAssignedSummaryLabel}>Assigned Teams:</Text>
+                      <Text style={styles.teamAssignedSummaryValue}>
+                        {uniqueAssigned.map((name) => `"${name}"`).join(', ')}
+                      </Text>
+                    </View>
+                  )}
+                </View>
+              </View>
+
+              <View style={styles.summaryRightGroup}>
+                <View style={styles.collapseArrowCircle}>
+                  <Icon
+                    name={isExpanded ? 'chevron-up' : 'chevron-down'}
+                    size={16}
+                    color={COLORS.primary}
+                    strokeWidth={2.5}
+                  />
+                </View>
+              </View>
+            </TouchableOpacity>
+
+            {/* EXPANDABLE DETAILS */}
+            {isExpanded && (
+              <View style={styles.expandedDetailsContainer}>
+                <View style={styles.detailDividerTop} />
+
+                <View style={styles.sessionDetailsBox}>
+                  <View style={styles.detailRow}>
+                    <Text style={styles.detailLabel}>WhatsApp Name</Text>
+                    <Text style={[styles.detailValue, { color: COLORS.primaryNavy, fontWeight: '800' }]}>
+                      {displayName}
+                    </Text>
+                  </View>
+                  <View style={styles.detailDivider} />
+
+                  <View style={styles.detailRow}>
+                    <Text style={styles.detailLabel}>Account Type</Text>
+                    <View style={[styles.badgePill, isTeam ? styles.teamBadgePill : styles.personalBadgePill]}>
+                      <Text style={[styles.badgePillText, isTeam ? styles.teamBadgeText : styles.personalBadgeText]}>
+                        {account.account_type}
+                      </Text>
+                    </View>
+                  </View>
+                  <View style={styles.detailDivider} />
+
+                  <View style={styles.detailRow}>
+                    <Text style={styles.detailLabel}>Connected Status</Text>
+                    <Text style={[styles.detailValue, { color: COLORS.whatsappGreen, fontWeight: '700' }]}>
+                      Connected (Online)
+                    </Text>
+                  </View>
+                  <View style={styles.detailDivider} />
+
+                  <View style={styles.detailRow}>
+                    <Text style={styles.detailLabel}>Phone Number</Text>
+                    <Text style={styles.detailValue}>
+                      {account.phone_number ? `+${account.phone_number.replace('+', '')}` : 'Active'}
+                    </Text>
+                  </View>
+                  <View style={styles.detailDivider} />
+
+                  <View style={styles.detailRow}>
+                    <Text style={styles.detailLabel}>Socket Status</Text>
+                    <Text style={[styles.detailValue, { color: COLORS.whatsappGreen }]}>Online (2-way synced)</Text>
+                  </View>
+
+                  {isTeam && (
+                    <>
+                      <View style={styles.detailDivider} />
+                      <View style={styles.detailRow}>
+                        <Text style={styles.detailLabel}>Assigned Teams</Text>
+                        <View style={styles.teamAccessRow}>
+                          {isAdmin && (
+                            <TouchableOpacity
+                              style={styles.manageAccessMiniBtn}
+                              onPress={() => handleOpenAccessModal(account)}
+                            >
+                              <Text style={styles.manageAccessMiniText}>Manage</Text>
+                            </TouchableOpacity>
+                          )}
+                        </View>
+                      </View>
+                    </>
+                  )}
+                </View>
+
+                {/* Disconnect Button */}
+                <TouchableOpacity
+                  style={styles.resetButton}
+                  onPress={() => handleDisconnect(account)}
+                  activeOpacity={0.8}
+                >
+                  <Icon name="logout" size={16} color={COLORS.accentRed} />
+                  <Text style={styles.resetButtonText}>Disconnect</Text>
+                </TouchableOpacity>
+              </View>
+            )}
+          </View>
+        ) : (
+          /* ======================================================== */
+          /* DISCONNECTED STATE (CLEAN RECONNECT / DELETE)             */
+          /* ======================================================== */
+          <View style={styles.disconnectedCardContent}>
+            <View style={styles.cardHeaderRow}>
+              <View style={styles.cardHeaderLeft}>
+                <View style={[styles.statusDot, styles.dotDisconnected]} />
+                <Text style={styles.cardAccountTitle} numberOfLines={1}>
+                  {account.account_name}
+                </Text>
+              </View>
+              <View style={[styles.statusBadge, styles.statusBadgeOffline]}>
+                <Text style={[styles.statusBadgeText, styles.statusTextOffline]}>
+                  Disconnected
+                </Text>
+              </View>
+            </View>
+
+            <Text style={styles.disconnectedSubText}>
+              This WhatsApp session is disconnected. Tap below to scan a QR code or remove it.
+            </Text>
+
+            <View style={styles.disconnectedBtnRow}>
+              <TouchableOpacity
+                style={styles.reconnectBtn}
+                onPress={() => openScanModal(account.account_type, account.id)}
+                activeOpacity={0.8}
+              >
+                <Icon name="refresh" size={14} color={COLORS.primary} />
+                <Text style={styles.reconnectBtnText}>Scan QR Code</Text>
+              </TouchableOpacity>
+
+              {(!isTeam || isAdmin) && (
+                <TouchableOpacity
+                  style={styles.deleteMiniBtn}
+                  onPress={() => handleDelete(account)}
+                  activeOpacity={0.8}
+                >
+                  <Icon name="trash" size={14} color={COLORS.accentRed} />
+                  <Text style={styles.deleteMiniBtnText}>Delete</Text>
+                </TouchableOpacity>
+              )}
+            </View>
+          </View>
+        )}
+      </View>
+    );
+  };
+
+  const currentQr = pendingAccountId ? qrCodes[pendingAccountId] : null;
+
+  if (!hasLoadedAccounts && accounts.length === 0) {
+    return (
+      <View style={styles.screenWrapper}>
+        <Header
+          title="WhatsApp Session"
+          onBack={() => navigation.navigate('Home')}
+        />
+        <View style={styles.centerLoadingContainer}>
+          <ActivityIndicator size="large" color={COLORS.primary} />
+          <Text style={styles.loadingText}>Loading WhatsApp sessions...</Text>
+        </View>
+      </View>
+    );
+  }
 
   return (
     <View style={styles.screenWrapper}>
@@ -120,244 +551,323 @@ export const LinkScreen: React.FC = () => {
         title="WhatsApp Session"
         onBack={() => navigation.navigate('Home')}
       />
+
       <ScrollView contentContainerStyle={styles.container} showsVerticalScrollIndicator={false}>
-        {/* Main Connection Card */}
-        <View style={styles.card}>
-          {isCheckingStatus && !hasCheckedStatus ? (
-            <View style={styles.statusLoadingContainer}>
-              <ActivityIndicator size="large" color={COLORS.primary} />
-              <Text style={styles.statusLoadingTitle}>Checking WhatsApp Session</Text>
-              <Text style={styles.statusLoadingSub}>
-                Connecting to WhatsApp service, please wait...
-              </Text>
-            </View>
-          ) : isConnected ? (
-            <View style={styles.connectedContainer}>
-              <View style={styles.successIconBox}>
-                <Icon name="check-double" size={32} color={COLORS.whatsappGreen} strokeWidth={2.5} />
+        {/* ======================================================== */}
+        {/* 1. PERSONAL WHATSAPP SECTION                             */}
+        {/* ======================================================== */}
+        <View style={styles.sectionContainer}>
+          <View style={styles.sectionHeaderRow}>
+            <View style={styles.sectionTitleGroup}>
+              <View style={[styles.sectionIconCircle, { backgroundColor: '#EFF6FF' }]}>
+                <Icon name="user" size={16} color={COLORS.primary} strokeWidth={2.5} />
               </View>
-              <Text style={styles.connectedTitle}>Session Active & Ready</Text>
-              <View style={styles.sessionDetailsBox}>
-                <View style={styles.detailRow}>
-                  <Text style={styles.detailLabel}>Connected Name</Text>
-                  <Text style={styles.detailValue}>{name || 'Staff Assistant'}</Text>
-                </View>
-                <View style={styles.detailDivider} />
-                <View style={styles.detailRow}>
-                  <Text style={styles.detailLabel}>Connected Status</Text>
-                  <Text style={[styles.detailValue, { color: COLORS.whatsappGreen, fontWeight: '700' }]}>
-                    {isConnected ? 'Connected' : 'Offline'}
-                  </Text>
-                </View>
-                <View style={styles.detailDivider} />
-                <View style={styles.detailRow}>
-                  <Text style={styles.detailLabel}>Phone Number</Text>
-                  <Text style={styles.detailValue}>{phone || 'Active'}</Text>
-                </View>
-                <View style={styles.detailDivider} />
-                <View style={styles.detailRow}>
-                  <Text style={styles.detailLabel}>Socket Status</Text>
-                  <Text style={[styles.detailValue, { color: COLORS.whatsappGreen }]}>Online (2-way)</Text>
-                </View>
+              <Text style={styles.sectionTitle}>Personal WhatsApp</Text>
+              <View style={styles.countBadge}>
+                <Text style={styles.countBadgeText}>{personalAccounts.length}</Text>
               </View>
             </View>
-          ) : (
-            <View style={styles.qrContainer}>
-              <Text style={styles.qrInstructionsTitle}>Scan to Link WhatsApp</Text>
-              <Text style={styles.qrInstructionsSub}>
-                Point your WhatsApp camera at the code below, or open the link on PC.
-              </Text>
 
-              <View style={styles.qrImageFrame}>
-                {isLoading ? (
-                  <View style={styles.qrLoadingBox}>
-                    <ActivityIndicator size="large" color={COLORS.primary} />
-                    <Text style={styles.qrLoadingText}>
-                      Generating QR code... Please wait
-                    </Text>
-                  </View>
-                ) : qrDataUrl ? (
-                  <Image
-                    source={{ uri: qrDataUrl }}
-                    style={styles.qrImage}
-                    resizeMode="contain"
-                  />
-                ) : (
-                  <View style={styles.qrEmptyBox}>
-                    <Icon name="qr-code" size={46} color={COLORS.textMuted} strokeWidth={1.5} />
-                    <Text style={styles.qrEmptyTitle}>No QR Code Active</Text>
-                    <Text style={styles.qrEmptySub}>
-                      Tap "Generate QR Code" below to generate a new WhatsApp QR code.
-                    </Text>
-                  </View>
-                )}
-              </View>
-
-              {/* Direct Regenerate / Generate QR button */}
-              <TouchableOpacity
-                style={styles.regenerateButton}
-                onPress={() => regenerateQr()}
-                disabled={isLoading}
-                activeOpacity={0.8}
-              >
-                {isLoading ? (
-                  <ActivityIndicator size="small" color={COLORS.primaryNavy} />
-                ) : (
-                  <>
-                    <Icon name="refresh" size={16} color={COLORS.primaryNavy} strokeWidth={2.2} />
-                    <Text style={styles.regenerateButtonText}>
-                      {qrDataUrl ? 'Regenerate QR Code' : 'Generate QR Code'}
-                    </Text>
-                  </>
-                )}
-              </TouchableOpacity>
-
-              {/* Note regarding QR Code expiration */}
-              <View style={styles.expiryNoteBox}>
-                <View style={styles.expiryNoteHeader}>
-                  <Icon name="clock" size={13} color="#B45309" strokeWidth={2.2} />
-                  <Text style={styles.expiryNoteTitle}>Important Note:</Text>
-                </View>
-                <Text style={styles.expiryNoteText}>
-                  The QR code expires in 1 minute. If you do not scan it before expiry, please press <Text style={{ fontWeight: '700' }}>"Regenerate QR Code"</Text> to generate a new one.
-                </Text>
-              </View>
-            </View>
-          )}
-
-          {/* QR Page Link & Sharing (only when not checking and not connected) */}
-          {(!isCheckingStatus || hasCheckedStatus) && !isConnected && (
-            <View style={styles.linkShareSection}>
-              <View style={styles.actionButtonsRow}>
-                <TouchableOpacity
-                  style={styles.actionBtnOutline}
-                  onPress={handleCopyLink}
-                  activeOpacity={0.8}
-                >
-                  <Icon name="copy" size={16} color={COLORS.primary} />
-                  <Text style={styles.actionBtnOutlineText}>Show Full URL</Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                  style={styles.actionBtnPrimary}
-                  onPress={handleShareLink}
-                  activeOpacity={0.8}
-                >
-                  <Icon name="share" size={16} color={COLORS.bgWhite} />
-                  <Text style={styles.actionBtnPrimaryText}>Share</Text>
-                </TouchableOpacity>
-              </View>
-            </View>
-          )}
-
-          {/* Instructions list (only when not checking and not connected) */}
-          {(!isCheckingStatus || hasCheckedStatus) && !isConnected && (
-            <View style={styles.guideBox}>
-              <Text style={styles.guideTitle}>How to connect:</Text>
-              <Text style={styles.guideStep}>1. Open WhatsApp on your device</Text>
-              <Text style={styles.guideStep}>2. Tap Settings &gt; Linked Devices &gt; Link a Device</Text>
-              <Text style={styles.guideStep}>3. Scan the QR code shown above or open the shared link on PC</Text>
-            </View>
-          )}
-
-          {/* Reset Session Button */}
-          {(!isCheckingStatus || hasCheckedStatus) && (
             <TouchableOpacity
-              style={styles.resetButton}
-              onPress={handleResetSession}
-              disabled={isResetting}
+              style={styles.sectionAddBtn}
+              onPress={() => openScanModal('PERSONAL')}
               activeOpacity={0.8}
             >
-              {isResetting ? (
-                <ActivityIndicator size="small" color={COLORS.accentRed} />
-              ) : (
-                <>
-                  <Icon name="refresh" size={16} color={COLORS.accentRed} />
-                  <Text style={styles.resetButtonText}>Disconnect & Reset Session</Text>
-                </>
-              )}
+              <Icon name="plus" size={13} color={COLORS.primary} strokeWidth={2.8} />
+              <Text style={styles.sectionAddBtnText}>Add Personal</Text>
             </TouchableOpacity>
+          </View>
+
+          {personalAccounts.length > 0 ? (
+            personalAccounts.map((acc) => renderAccountCard(acc))
+          ) : isFetchingAccounts && accounts.length === 0 ? (
+            <View style={styles.loadingSectionCard}>
+              <ActivityIndicator size="small" color={COLORS.primary} />
+              <Text style={styles.loadingSectionText}>Loading Personal WhatsApp...</Text>
+            </View>
+          ) : (
+            <View style={styles.emptyCard}>
+              <View style={styles.emptyIconCircle}>
+                <Icon name="user" size={24} color={COLORS.textSubtle} />
+              </View>
+              <Text style={styles.emptyHeaderTitle}>No data</Text>
+              <Text style={styles.emptyHeaderDesc}>
+                No Personal WhatsApp account connected.
+              </Text>
+            </View>
           )}
         </View>
+
+        {/* ======================================================== */}
+        {/* 2. TEAM WHATSAPP SECTION                                 */}
+        {/* ======================================================== */}
+        <View style={[styles.sectionContainer, { marginTop: SPACING.lg }]}>
+          <View style={styles.sectionHeaderRow}>
+            <View style={styles.sectionTitleGroup}>
+              <View style={[styles.sectionIconCircle, { backgroundColor: '#EEF2FF' }]}>
+                <Icon name="users" size={16} color="#4F46E5" strokeWidth={2.5} />
+              </View>
+              <Text style={styles.sectionTitle}>Team WhatsApp</Text>
+              <View style={[styles.countBadge, { backgroundColor: '#EEF2FF' }]}>
+                <Text style={[styles.countBadgeText, { color: '#4F46E5' }]}>{teamAccounts.length}</Text>
+              </View>
+            </View>
+
+            {isAdmin && (
+              <TouchableOpacity
+                style={[styles.sectionAddBtn, styles.sectionAddBtnTeam]}
+                onPress={() => openScanModal('TEAM')}
+                activeOpacity={0.8}
+              >
+                <Icon name="plus" size={13} color="#4F46E5" strokeWidth={2.8} />
+                <Text style={[styles.sectionAddBtnText, { color: '#4F46E5' }]}>Add Team</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+
+          {teamAccounts.length > 0 ? (
+            teamAccounts.map((acc) => renderAccountCard(acc))
+          ) : isFetchingAccounts && accounts.length === 0 ? (
+            <View style={styles.loadingSectionCard}>
+              <ActivityIndicator size="small" color="#4F46E5" />
+              <Text style={[styles.loadingSectionText, { color: '#4F46E5' }]}>Loading Team WhatsApp...</Text>
+            </View>
+          ) : (
+            <View style={styles.emptyCard}>
+              <View style={[styles.emptyIconCircle, { backgroundColor: '#EEF2FF' }]}>
+                <Icon name="users" size={24} color="#818CF8" />
+              </View>
+              <Text style={styles.emptyHeaderTitle}>No data</Text>
+              <Text style={styles.emptyHeaderDesc}>
+                {isAdmin
+                  ? 'No Team WhatsApp accounts configured.'
+                  : 'No Team WhatsApp accounts assigned to your profile.'}
+              </Text>
+            </View>
+          )}
+        </View>
+
+        <View style={{ height: 40 }} />
       </ScrollView>
 
-      {/* Show Full URL & Copy Modal */}
-      <Modal
-        visible={showUrlModal}
-        transparent={true}
-        animationType="fade"
-        onRequestClose={() => setShowUrlModal(false)}
-      >
-        <TouchableOpacity
-          style={styles.modalOverlay}
-          activeOpacity={1}
-          onPress={() => setShowUrlModal(false)}
-        >
-          <TouchableOpacity
-            style={styles.modalCard}
-            activeOpacity={1}
-            onPress={(e) => e.stopPropagation()}
-          >
+      {/* ======================================================== */}
+      {/* MODAL: SCAN TO LINK WHATSAPP                             */}
+      {/* ======================================================== */}
+      <Modal visible={showScanModal} transparent animationType="slide">
+        <View style={styles.modalOverlay}>
+          <View style={styles.scanModalContent}>
+            {/* Modal Header */}
+            <View style={styles.modalHeader}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                <View style={[styles.modalIconWrap, scanModalType === 'TEAM' && { backgroundColor: '#EEF2FF' }]}>
+                  <Icon
+                    name={scanModalType === 'TEAM' ? 'users' : 'user'}
+                    size={16}
+                    color={scanModalType === 'TEAM' ? '#4F46E5' : COLORS.primary}
+                    strokeWidth={2.5}
+                  />
+                </View>
+                <Text style={styles.modalTitle}>
+                  Link {scanModalType === 'PERSONAL' ? 'Personal' : 'Team'} WhatsApp
+                </Text>
+              </View>
+              <TouchableOpacity onPress={handleCloseScanModal}>
+                <Icon name="x" size={22} color={COLORS.textMuted} />
+              </TouchableOpacity>
+            </View>
+
+            <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingVertical: 8, alignItems: 'center' }}>
+              {!isQrReady ? (
+                /* INITIAL STEP: CLICK TO GENERATE QR */
+                <View style={styles.generatePromptBox}>
+                  <View style={styles.generateIconCircle}>
+                    <Icon name="link" size={32} color={COLORS.primary} strokeWidth={2.2} />
+                  </View>
+                  <Text style={styles.generateTitle}>Scan to Link WhatsApp</Text>
+                  <Text style={styles.generateDesc}>
+                    Tap the button below to generate a new QR code session and link your WhatsApp number.
+                  </Text>
+
+                  <TouchableOpacity
+                    style={styles.generateBtn}
+                    onPress={handleGenerateQrInModal}
+                    disabled={isGeneratingQr}
+                    activeOpacity={0.85}
+                  >
+                    {isGeneratingQr ? (
+                      <ActivityIndicator size="small" color={COLORS.bgWhite} />
+                    ) : (
+                      <>
+                        <Icon name="refresh" size={16} color={COLORS.bgWhite} strokeWidth={2.5} />
+                        <Text style={styles.generateBtnText}>Generate QR Code</Text>
+                      </>
+                    )}
+                  </TouchableOpacity>
+                </View>
+              ) : isQrExpired ? (
+                /* TIMEOUT / EXPIRED STEP: TAP TO RE-GENERATE */
+                <View style={styles.expiredPromptBox}>
+                  <View style={styles.expiredIconCircle}>
+                    <Icon name="clock" size={34} color="#D97706" strokeWidth={2.2} />
+                  </View>
+                  <Text style={styles.expiredTitle}>QR Code Expired</Text>
+                  <Text style={styles.expiredDesc}>
+                    The QR code timed out or scan was not completed. Tap below to generate a fresh QR code.
+                  </Text>
+
+                  <TouchableOpacity
+                    style={styles.generateBtn}
+                    onPress={handleGenerateQrInModal}
+                    disabled={isGeneratingQr}
+                    activeOpacity={0.85}
+                  >
+                    {isGeneratingQr ? (
+                      <ActivityIndicator size="small" color={COLORS.bgWhite} />
+                    ) : (
+                      <>
+                        <Icon name="refresh" size={16} color={COLORS.bgWhite} strokeWidth={2.5} />
+                        <Text style={styles.generateBtnText}>Generate New QR Code</Text>
+                      </>
+                    )}
+                  </TouchableOpacity>
+                </View>
+              ) : (
+                /* QR READY STEP: DISPLAY QR CODE TO SCAN */
+                <View style={styles.qrReadyBox}>
+                  <Text style={styles.qrInstructionsSub}>
+                    Point your WhatsApp camera at the code below to connect.
+                  </Text>
+
+                  <View style={styles.qrImageFrame}>
+                    {isGeneratingQr || !currentQr ? (
+                      <View style={styles.qrLoadingBox}>
+                        <ActivityIndicator size="large" color={COLORS.primary} />
+                        <Text style={styles.qrLoadingText}>
+                          Generating live QR session... Please wait
+                        </Text>
+                      </View>
+                    ) : (
+                      <Image
+                        source={{ uri: currentQr }}
+                        style={styles.qrImage}
+                        resizeMode="contain"
+                      />
+                    )}
+                  </View>
+
+                  {/* Countdown Notice */}
+                  <View style={styles.countdownBadge}>
+                    <Icon name="clock" size={12} color="#D97706" />
+                    <Text style={styles.countdownText}>
+                      Code expires in {qrCountdown}s
+                    </Text>
+                  </View>
+
+                  <TouchableOpacity
+                    style={styles.regenerateButton}
+                    onPress={handleGenerateQrInModal}
+                    disabled={isGeneratingQr}
+                    activeOpacity={0.8}
+                  >
+                    <Icon name="refresh" size={14} color={COLORS.primaryNavy} />
+                    <Text style={styles.regenerateButtonText}>Reload QR Code</Text>
+                  </TouchableOpacity>
+
+                  {/* Step-by-Step Guide */}
+                  <View style={styles.guideBox}>
+                    <Text style={styles.guideTitle}>How to scan:</Text>
+                    <Text style={styles.guideStep}>1. Open WhatsApp on your phone</Text>
+                    <Text style={styles.guideStep}>
+                      2. Tap Menu ({Platform.OS === 'ios' ? 'Settings' : '⋮'}) &gt; Linked Devices
+                    </Text>
+                    <Text style={styles.guideStep}>3. Tap Link a Device</Text>
+                    <Text style={styles.guideStep}>4. Point your camera at this QR code</Text>
+                  </View>
+                </View>
+              )}
+            </ScrollView>
+
+            {/* Modal Bottom Close */}
+            <TouchableOpacity
+              style={styles.modalCancelBtnFull}
+              onPress={handleCloseScanModal}
+              activeOpacity={0.8}
+            >
+              <Text style={styles.modalCancelText}>Close</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
+      {/* ======================================================== */}
+      {/* MODAL: MANAGE TEAM ACCESS                                */}
+      {/* ======================================================== */}
+      <Modal visible={showAccessModal} transparent animationType="fade">
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalCard}>
             <View style={styles.modalHeader}>
               <View style={styles.modalTitleRow}>
-                <View style={styles.modalIconWrap}>
-                  <Icon name="link" size={17} color={COLORS.primaryNavy} />
+                <View style={[styles.modalIconWrap, { backgroundColor: '#EEF2FF' }]}>
+                  <Icon name="users" size={16} color="#4F46E5" />
                 </View>
-                <Text style={styles.modalTitle}>QR Web Scanner URL</Text>
+                <Text style={styles.modalTitle}>Team Access</Text>
               </View>
-              <TouchableOpacity
-                onPress={() => setShowUrlModal(false)}
-                style={styles.modalCloseBtn}
-                hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
-              >
-                <Text style={styles.modalCloseText}>✕</Text>
+              <TouchableOpacity onPress={() => setShowAccessModal(false)}>
+                <Icon name="x" size={22} color={COLORS.textMuted} />
               </TouchableOpacity>
             </View>
 
             <Text style={styles.modalSubtitle}>
-              Open this URL in a browser on your PC to scan and link WhatsApp Web:
+              Select team members who can view chats and send messages via{' '}
+              <Text style={{ fontWeight: '700', color: COLORS.textDark }}>
+                {accessAccount?.account_name}
+              </Text>
             </Text>
 
-            <View style={styles.modalUrlInputWrapper}>
-              <TextInput
-                value={qrPageUrl}
-                editable={false}
-                multiline={true}
-                selectTextOnFocus={true}
-                style={styles.modalUrlInput}
-              />
-            </View>
-
-            {copied && (
-              <View style={styles.copiedBadge}>
-                <Icon name="check" size={13} color="#16A34A" />
-                <Text style={styles.copiedBadgeText}>Copied to clipboard!</Text>
-              </View>
-            )}
+            <ScrollView style={styles.userListScroll} showsVerticalScrollIndicator={false}>
+              {allUsers.map((u) => {
+                const isChecked = selectedUserIds.includes(u.id);
+                return (
+                  <TouchableOpacity
+                    key={u.id}
+                    style={[styles.userRow, isChecked && styles.userRowChecked]}
+                    onPress={() => toggleUserAccess(u.id)}
+                    activeOpacity={0.7}
+                  >
+                    <View style={styles.userRowInfo}>
+                      <Text style={styles.userNameText}>{u.name}</Text>
+                      <Text style={styles.userEmailText}>{u.email} • {u.role}</Text>
+                    </View>
+                    <View style={[styles.checkbox, isChecked && styles.checkboxChecked]}>
+                      {isChecked && <Icon name="check" size={12} color={COLORS.bgWhite} strokeWidth={3} />}
+                    </View>
+                  </TouchableOpacity>
+                );
+              })}
+            </ScrollView>
 
             <View style={styles.modalBtnRow}>
               <TouchableOpacity
-                style={[styles.modalActionBtn, styles.modalCopyBtn, copied && styles.modalCopyBtnActive]}
-                onPress={copyToClipboard}
-                activeOpacity={0.8}
+                style={styles.modalCancelBtn}
+                onPress={() => setShowAccessModal(false)}
               >
-                <Icon name={copied ? 'check' : 'copy'} size={15} color={copied ? '#FFFFFF' : COLORS.primaryNavy} />
-                <Text style={[styles.modalCopyBtnText, copied && { color: '#FFFFFF' }]}>
-                  {copied ? 'Copied!' : 'Copy URL'}
-                </Text>
+                <Text style={styles.modalCancelText}>Cancel</Text>
               </TouchableOpacity>
 
               <TouchableOpacity
-                style={[styles.modalActionBtn, styles.modalShareBtn]}
-                onPress={handleShareLink}
-                activeOpacity={0.8}
+                style={[styles.modalSubmitBtn, { backgroundColor: '#4F46E5' }]}
+                onPress={handleSaveAccess}
+                disabled={isSavingAccess}
               >
-                <Icon name="share" size={15} color="#FFFFFF" />
-                <Text style={styles.modalShareBtnText}>Share Link</Text>
+                {isSavingAccess ? (
+                  <ActivityIndicator size="small" color={COLORS.bgWhite} />
+                ) : (
+                  <Text style={styles.modalSubmitText}>Save Access</Text>
+                )}
               </TouchableOpacity>
             </View>
-          </TouchableOpacity>
-        </TouchableOpacity>
+          </View>
+        </View>
       </Modal>
     </View>
   );
@@ -366,374 +876,666 @@ export const LinkScreen: React.FC = () => {
 const styles = StyleSheet.create({
   screenWrapper: {
     flex: 1,
-    backgroundColor: COLORS.bgWhite,
+    backgroundColor: COLORS.bg,
   },
   container: {
-    paddingTop: 0,
-    paddingBottom: SPACING.xxxl,
-    backgroundColor: COLORS.bgWhite,
+    padding: SPACING.lg,
+    paddingBottom: 40,
   },
-  connectedName: {
-    fontSize: 22,
-    fontWeight: '800',
-    color: COLORS.primaryNavy,
-    marginBottom: 8,
-    letterSpacing: -0.3,
-    textAlign: 'center',
+
+  // SECTION STYLES
+  sectionContainer: {
+    marginBottom: SPACING.md,
   },
-  statusPill: {
+  sectionHeaderRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: COLORS.bgWhite,
-    paddingHorizontal: 14,
-    paddingVertical: 6,
-    borderRadius: RADIUS.full,
+    justifyContent: 'space-between',
+    marginBottom: SPACING.sm,
+    paddingHorizontal: 2,
+  },
+  sectionTitleGroup: {
+    flexDirection: 'row',
+    alignItems: 'center',
     gap: 8,
+  },
+  sectionIconCircle: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  sectionTitle: {
+    fontSize: 16,
+    fontWeight: '800',
+    color: COLORS.primaryNavy,
+  },
+  countBadge: {
+    backgroundColor: '#EFF6FF',
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 10,
+  },
+  countBadgeText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: COLORS.primary,
+  },
+  sectionAddBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: '#EFF6FF',
     borderWidth: 1,
-    borderColor: COLORS.borderColor,
-    marginBottom: 10,
+    borderColor: '#BFDBFE',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: RADIUS.md,
+    minHeight: 30,
+  },
+  sectionAddBtnTeam: {
+    backgroundColor: '#EEF2FF',
+    borderColor: '#C7D2FE',
+  },
+  sectionAddBtnText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: COLORS.primary,
+  },
+
+  // CARD STYLES
+  card: {
+    backgroundColor: COLORS.bgWhite,
+    borderRadius: RADIUS.xl,
+    padding: SPACING.md,
+    marginBottom: SPACING.md,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.05,
+    shadowRadius: 8,
+    elevation: 3,
+  },
+
+  // CONNECTED COLLAPSIBLE SUMMARY HEADER
+  summaryHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 4,
+  },
+  summaryLeftGroup: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    flex: 1,
+  },
+  whatsappIconCircle: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: '#ECFDF5',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: '#A7F3D0',
+  },
+  summaryInfoCol: {
+    flex: 1,
+  },
+  nameBadgeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  connectedNameText: {
+    fontSize: 15,
+    fontWeight: '800',
+    color: COLORS.primaryNavy,
+    maxWidth: '70%',
+  },
+  miniActiveBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    backgroundColor: '#ECFDF5',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#A7F3D0',
+  },
+  miniActiveBadgeText: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: '#059669',
+  },
+  connectedNumberText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#64748B',
+    marginTop: 2,
+  },
+  teamAssignedSummaryRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    marginTop: 4,
+    gap: 4,
+  },
+  teamAssignedSummaryLabel: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#4F46E5',
+  },
+  teamAssignedSummaryValue: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: COLORS.primaryNavy,
+  },
+  summaryRightGroup: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginLeft: 8,
+  },
+  collapseArrowCircle: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: '#F1F5F9',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+
+  // EXPANDED DETAILS
+  expandedDetailsContainer: {
+    marginTop: SPACING.sm,
+  },
+  detailDividerTop: {
+    height: 1,
+    backgroundColor: '#F1F5F9',
+    marginBottom: SPACING.md,
+  },
+  sessionDetailsBox: {
+    width: '100%',
+    backgroundColor: '#F8FAFC',
+    borderRadius: RADIUS.lg,
+    padding: SPACING.md,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    marginBottom: SPACING.md,
+  },
+  detailRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: 4,
+  },
+  detailDivider: {
+    height: 1,
+    backgroundColor: '#E2E8F0',
+    marginVertical: 6,
+  },
+  detailLabel: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: COLORS.textMuted,
+  },
+  detailValue: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: COLORS.textDark,
+  },
+  badgePill: {
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 6,
+  },
+  personalBadgePill: {
+    backgroundColor: '#EFF6FF',
+  },
+  teamBadgePill: {
+    backgroundColor: '#EEF2FF',
+  },
+  badgePillText: {
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  personalBadgeText: {
+    color: COLORS.primary,
+  },
+  teamBadgeText: {
+    color: '#4F46E5',
+  },
+  teamAccessRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  manageAccessMiniBtn: {
+    backgroundColor: '#EEF2FF',
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 4,
+    borderWidth: 1,
+    borderColor: '#C7D2FE',
+  },
+  manageAccessMiniText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#4F46E5',
+  },
+  resetButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    backgroundColor: '#FEF2F2',
+    borderWidth: 1,
+    borderColor: '#FECACA',
+    borderRadius: RADIUS.md,
+    paddingVertical: 11,
+    width: '100%',
+  },
+  resetButtonText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: COLORS.accentRed,
+  },
+
+  // DISCONNECTED CARD CONTENT (ON MAIN SCREEN)
+  disconnectedCardContent: {
+    padding: SPACING.xs,
+  },
+  cardHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingBottom: SPACING.xs,
+    borderBottomWidth: 1,
+    borderBottomColor: '#F1F5F9',
+    marginBottom: SPACING.sm,
+    width: '100%',
+  },
+  cardHeaderLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    flex: 1,
+  },
+  cardAccountTitle: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: COLORS.textDark,
+    flex: 1,
   },
   statusDot: {
     width: 8,
     height: 8,
     borderRadius: 4,
   },
-  dotConnected: {
-    backgroundColor: COLORS.whatsappGreen,
+  dotDisconnected: {
+    backgroundColor: '#94A3B8',
   },
-  dotWaiting: {
-    backgroundColor: '#EAB308',
+  statusBadge: {
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: RADIUS.sm,
   },
-  dotOffline: {
-    backgroundColor: COLORS.accentRed,
+  statusBadgeOffline: {
+    backgroundColor: '#F1F5F9',
   },
-  statusText: {
-    fontSize: 12,
+  statusBadgeText: {
+    fontSize: 11,
     fontWeight: '700',
-    color: COLORS.textDark,
   },
-  title: {
-    fontSize: 22,
-    fontWeight: '800',
-    color: COLORS.primaryNavy,
-    textAlign: 'center',
+  statusTextOffline: {
+    color: '#64748B',
   },
-  subtitle: {
-    fontSize: 13,
+  disconnectedSubText: {
+    fontSize: 12,
     color: COLORS.textMuted,
-    textAlign: 'center',
-    marginTop: 4,
-    paddingHorizontal: 20,
-    lineHeight: 18,
+    lineHeight: 17,
+    marginBottom: SPACING.md,
   },
-  card: {
-    backgroundColor: COLORS.bgWhite,
-    width: '100%',
-    borderRadius: 0,
-    paddingVertical: SPACING.xl,
-    paddingHorizontal: SPACING.lg,
-    borderTopWidth: 0,
-    borderBottomWidth: 0,
-    borderLeftWidth: 0,
-    borderRightWidth: 0,
-    borderColor: COLORS.borderColor,
-    shadowColor: COLORS.shadowColor,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.05,
-    shadowRadius: 10,
-    elevation: 2,
+  disconnectedBtnRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
   },
-  statusLoadingContainer: {
+  reconnectBtn: {
+    flex: 1,
+    flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: 60,
+    gap: 6,
+    backgroundColor: '#EFF6FF',
+    borderWidth: 1,
+    borderColor: '#BFDBFE',
+    borderRadius: RADIUS.md,
+    paddingVertical: 9,
   },
-  statusLoadingTitle: {
-    fontSize: 17,
+  reconnectBtnText: {
+    fontSize: 12,
     fontWeight: '700',
-    color: COLORS.primaryNavy,
-    marginTop: 16,
+    color: COLORS.primary,
   },
-  statusLoadingSub: {
-    fontSize: 13,
+  deleteMiniBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 4,
+    backgroundColor: '#FEF2F2',
+    borderWidth: 1,
+    borderColor: '#FECACA',
+    borderRadius: RADIUS.md,
+    paddingHorizontal: 14,
+    paddingVertical: 9,
+  },
+  deleteMiniBtnText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: COLORS.accentRed,
+  },
+
+  // LOADING STATES
+  centerLoadingContainer: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: SPACING.xl,
+    gap: 12,
+  },
+  loadingText: {
+    fontSize: 14,
+    fontWeight: '600',
     color: COLORS.textMuted,
-    marginTop: 6,
+  },
+  loadingSectionCard: {
+    backgroundColor: COLORS.bgWhite,
+    borderRadius: RADIUS.xl,
+    padding: SPACING.xl,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    marginBottom: SPACING.md,
+    flexDirection: 'row',
+    gap: 10,
+  },
+  loadingSectionText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: COLORS.textMuted,
+  },
+
+  // EMPTY CARD
+  emptyCard: {
+    backgroundColor: COLORS.bgWhite,
+    borderRadius: RADIUS.xl,
+    padding: SPACING.lg,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    marginBottom: SPACING.md,
+  },
+  emptyIconCircle: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: '#F1F5F9',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: SPACING.xs,
+  },
+  emptyHeaderTitle: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: COLORS.textDark,
     textAlign: 'center',
   },
-  connectedContainer: {
-    alignItems: 'center',
-    paddingVertical: SPACING.md,
+  emptyHeaderDesc: {
+    fontSize: 12,
+    color: COLORS.textMuted,
+    textAlign: 'center',
+    marginTop: 2,
+    lineHeight: 16,
+    paddingHorizontal: 8,
   },
-  successIconBox: {
+  emptyAddBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: COLORS.primary,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: RADIUS.md,
+    marginTop: SPACING.md,
+    minHeight: 38,
+  },
+  emptyAddBtnText: {
+    color: COLORS.bgWhite,
+    fontSize: 12,
+    fontWeight: '700',
+  },
+
+  // SCAN TO LINK MODAL
+  scanModalContent: {
+    width: '100%',
+    maxHeight: '88%',
+    backgroundColor: COLORS.bgWhite,
+    borderTopLeftRadius: RADIUS.xl,
+    borderTopRightRadius: RADIUS.xl,
+    padding: SPACING.lg,
+    paddingBottom: Platform.OS === 'android' ? 44 : 34,
+  },
+  generatePromptBox: {
+    alignItems: 'center',
+    paddingVertical: SPACING.lg,
+    width: '100%',
+  },
+  generateIconCircle: {
     width: 64,
     height: 64,
     borderRadius: 32,
-    backgroundColor: COLORS.whatsappLight,
+    backgroundColor: '#EFF6FF',
     alignItems: 'center',
     justifyContent: 'center',
     marginBottom: SPACING.md,
   },
-  connectedTitle: {
-    fontSize: 18,
+  generateTitle: {
+    fontSize: 17,
     fontWeight: '800',
-    color: COLORS.textDark,
+    color: COLORS.primaryNavy,
+    textAlign: 'center',
+    marginBottom: 6,
   },
-  connectedDesc: {
+  generateDesc: {
     fontSize: 13,
     color: COLORS.textMuted,
     textAlign: 'center',
-    marginTop: 6,
-    paddingHorizontal: 10,
-    lineHeight: 18,
+    lineHeight: 19,
+    marginBottom: SPACING.xl,
+    paddingHorizontal: 16,
   },
-  sessionDetailsBox: {
-    width: '100%',
-    backgroundColor: COLORS.bgLinen,
-    borderRadius: RADIUS.lg,
-    padding: SPACING.md,
-    marginTop: SPACING.lg,
-    borderWidth: 1,
-    borderColor: COLORS.borderColor,
-  },
-  detailRow: {
+  generateBtn: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
-    paddingVertical: 4,
-  },
-  detailLabel: {
-    fontSize: 12,
-    color: COLORS.textMuted,
-    fontWeight: '600',
-  },
-  detailValue: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: COLORS.textDark,
-  },
-  detailDivider: {
-    height: 1,
-    backgroundColor: COLORS.borderColor,
-    marginVertical: 6,
-  },
-  qrContainer: {
     alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    backgroundColor: COLORS.primary,
+    paddingVertical: 14,
+    paddingHorizontal: 28,
+    borderRadius: RADIUS.lg,
+    width: '100%',
+    maxWidth: 280,
+    shadowColor: COLORS.primary,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.2,
+    shadowRadius: 8,
+    elevation: 4,
   },
-  qrInstructionsTitle: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: COLORS.textDark,
+  generateBtnText: {
+    fontSize: 14,
+    fontWeight: '800',
+    color: COLORS.bgWhite,
+  },
+
+  // EXPIRED BOX
+  expiredPromptBox: {
+    alignItems: 'center',
+    paddingVertical: SPACING.lg,
+    width: '100%',
+  },
+  expiredIconCircle: {
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    backgroundColor: '#FEF3C7',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: SPACING.md,
+  },
+  expiredTitle: {
+    fontSize: 17,
+    fontWeight: '800',
+    color: '#92400E',
+    textAlign: 'center',
+    marginBottom: 6,
+  },
+  expiredDesc: {
+    fontSize: 13,
+    color: '#B45309',
+    textAlign: 'center',
+    lineHeight: 19,
+    marginBottom: SPACING.xl,
+    paddingHorizontal: 16,
+  },
+
+  qrReadyBox: {
+    alignItems: 'center',
+    width: '100%',
   },
   qrInstructionsSub: {
-    fontSize: 12,
+    fontSize: 13,
     color: COLORS.textMuted,
     textAlign: 'center',
-    marginTop: 4,
+    lineHeight: 18,
     marginBottom: SPACING.md,
   },
   qrImageFrame: {
-    width: 240,
-    height: 240,
+    width: 220,
+    height: 220,
+    backgroundColor: '#FFFFFF',
     borderRadius: RADIUS.lg,
-    borderWidth: 2,
-    borderColor: COLORS.borderColor,
-    backgroundColor: '#FAFAFA',
     alignItems: 'center',
     justifyContent: 'center',
-    overflow: 'hidden',
+    borderWidth: 1.5,
+    borderColor: '#E2E8F0',
+    marginBottom: SPACING.sm,
   },
   qrImage: {
-    width: '100%',
-    height: '100%',
+    width: 200,
+    height: 200,
   },
   qrLoadingBox: {
     alignItems: 'center',
     justifyContent: 'center',
-    padding: SPACING.lg,
+    padding: SPACING.md,
   },
   qrLoadingText: {
     fontSize: 12,
     color: COLORS.textMuted,
+    textAlign: 'center',
     marginTop: 10,
-    textAlign: 'center',
-  },
-  qrEmptyBox: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: SPACING.md,
-  },
-  qrEmptyTitle: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: COLORS.textDark,
-    marginTop: 8,
-  },
-  qrEmptySub: {
-    fontSize: 11,
-    color: COLORS.textMuted,
-    textAlign: 'center',
-    marginTop: 4,
     lineHeight: 16,
+  },
+  countdownBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    backgroundColor: '#FFFBEB',
     paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 12,
+    marginBottom: 10,
+    borderWidth: 1,
+    borderColor: '#FDE68A',
+  },
+  countdownText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#B45309',
   },
   regenerateButton: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 8,
-    backgroundColor: '#EEF2FF',
+    gap: 6,
+    backgroundColor: '#F8FAFC',
     borderWidth: 1,
-    borderColor: '#C7D2FE',
+    borderColor: '#CBD5E1',
     borderRadius: RADIUS.md,
     paddingVertical: 10,
-    paddingHorizontal: 18,
-    marginTop: 14,
-    width: 240,
+    paddingHorizontal: 16,
+    width: '100%',
+    marginBottom: 10,
   },
   regenerateButtonText: {
     fontSize: 13,
     fontWeight: '700',
     color: COLORS.primaryNavy,
   },
-  expiryNoteBox: {
-    backgroundColor: '#FFFBEB',
-    borderWidth: 1,
-    borderColor: '#FDE68A',
-    borderRadius: RADIUS.md,
-    padding: 10,
-    marginTop: 14,
-    width: 260,
-  },
-  expiryNoteHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 5,
-    marginBottom: 4,
-  },
-  expiryNoteTitle: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: '#92400E',
-  },
-  expiryNoteText: {
-    fontSize: 11,
-    color: '#78350F',
-    lineHeight: 16,
-  },
-  linkShareSection: {
-    marginTop: SPACING.xl,
-    paddingTop: SPACING.lg,
-    borderTopWidth: 1,
-    borderTopColor: COLORS.borderColor,
-  },
-  linkShareLabel: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: COLORS.textDark,
-    marginBottom: 6,
-  },
-  urlBox: {
-    backgroundColor: COLORS.bgLinen,
-    borderRadius: RADIUS.md,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    borderWidth: 1,
-    borderColor: COLORS.borderColor,
-    marginBottom: 10,
-  },
-  urlText: {
-    fontSize: 12,
-    color: COLORS.primaryNavy,
-    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-  },
-  actionButtonsRow: {
-    flexDirection: 'row',
-    gap: 10,
-  },
-  actionBtnOutline: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    height: 42,
-    borderRadius: RADIUS.md,
-    borderWidth: 1,
-    borderColor: COLORS.primary,
-    gap: 6,
-  },
-  actionBtnOutlineText: {
-    color: COLORS.primary,
-    fontSize: 12,
-    fontWeight: '700',
-  },
-  actionBtnPrimary: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    height: 42,
-    borderRadius: RADIUS.md,
-    backgroundColor: COLORS.primary,
-    gap: 6,
-  },
-  actionBtnPrimaryText: {
-    color: COLORS.bgWhite,
-    fontSize: 12,
-    fontWeight: '700',
-  },
   guideBox: {
+    width: '100%',
     backgroundColor: '#F8FAFC',
-    borderRadius: RADIUS.md,
-    padding: SPACING.md,
-    marginTop: SPACING.lg,
     borderWidth: 1,
-    borderColor: COLORS.borderColor,
+    borderColor: '#E2E8F0',
+    borderRadius: RADIUS.md,
+    padding: 12,
+    marginTop: 4,
+    marginBottom: 10,
   },
   guideTitle: {
     fontSize: 12,
     fontWeight: '700',
     color: COLORS.textDark,
-    marginBottom: 4,
+    marginBottom: 6,
   },
   guideStep: {
-    fontSize: 12,
+    fontSize: 11,
     color: COLORS.textMuted,
-    lineHeight: 18,
+    lineHeight: 17,
   },
-  resetButton: {
-    flexDirection: 'row',
+
+  modalCancelBtnFull: {
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#FEE2E2',
-    height: 44,
+    paddingVertical: 13,
+    backgroundColor: '#F1F5F9',
     borderRadius: RADIUS.md,
-    marginTop: SPACING.lg,
-    gap: 8,
+    marginTop: 10,
+    marginBottom: Platform.OS === 'android' ? 12 : 0,
+    width: '100%',
   },
-  resetButtonText: {
-    color: COLORS.accentRed,
-    fontSize: 13,
-    fontWeight: '700',
-  },
+
+  // GENERIC MODAL STYLES (TEAM ACCESS)
   modalOverlay: {
     flex: 1,
     backgroundColor: 'rgba(15, 23, 42, 0.55)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: SPACING.lg,
+    justifyContent: 'flex-end',
   },
   modalCard: {
     width: '100%',
-    maxWidth: 360,
+    maxHeight: '88%',
     backgroundColor: COLORS.bgWhite,
-    borderRadius: RADIUS.xl,
+    borderTopLeftRadius: RADIUS.xl,
+    borderTopRightRadius: RADIUS.xl,
     padding: SPACING.lg,
-    borderWidth: 1,
-    borderColor: COLORS.borderColor,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.15,
-    shadowRadius: 16,
-    elevation: 8,
+    paddingBottom: Platform.OS === 'android' ? 44 : 34,
   },
   modalHeader: {
     flexDirection: 'row',
@@ -750,7 +1552,7 @@ const styles = StyleSheet.create({
     width: 32,
     height: 32,
     borderRadius: RADIUS.sm,
-    backgroundColor: '#EEF2FF',
+    backgroundColor: '#EFF6FF',
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -759,86 +1561,92 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: COLORS.textDark,
   },
-  modalCloseBtn: {
-    padding: 4,
-  },
-  modalCloseText: {
-    fontSize: 18,
-    fontWeight: '600',
-    color: COLORS.textMuted,
-  },
   modalSubtitle: {
     fontSize: 12,
     color: COLORS.textMuted,
     lineHeight: 18,
-    marginTop: 6,
+    marginTop: 4,
     marginBottom: SPACING.md,
-  },
-  modalUrlInputWrapper: {
-    backgroundColor: '#F8FAFC',
-    borderWidth: 1,
-    borderColor: '#E2E8F0',
-    borderRadius: RADIUS.md,
-    padding: SPACING.sm + 2,
-    maxHeight: 110,
-  },
-  modalUrlInput: {
-    fontSize: 12,
-    color: COLORS.textDark,
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-    padding: 0,
-  },
-  copiedBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    alignSelf: 'center',
-    gap: 6,
-    backgroundColor: '#DCFCE7',
-    paddingHorizontal: 12,
-    paddingVertical: 5,
-    borderRadius: RADIUS.full,
-    marginTop: 10,
-  },
-  copiedBadgeText: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: '#16A34A',
   },
   modalBtnRow: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 10,
-    marginTop: SPACING.lg,
+    marginTop: SPACING.md,
+    marginBottom: Platform.OS === 'android' ? 10 : 0,
   },
-  modalActionBtn: {
+  modalCancelBtn: {
     flex: 1,
-    flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 8,
     paddingVertical: 12,
+    backgroundColor: '#F1F5F9',
     borderRadius: RADIUS.md,
   },
-  modalCopyBtn: {
-    backgroundColor: '#EEF2FF',
+  modalCancelText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: COLORS.textMuted,
+  },
+  modalSubmitBtn: {
+    flex: 1.3,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 12,
+    backgroundColor: COLORS.primary,
+    borderRadius: RADIUS.md,
+  },
+  modalSubmitText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: COLORS.bgWhite,
+  },
+
+  // USER ACCESS LIST
+  userListScroll: {
+    maxHeight: 260,
+    marginVertical: 6,
+  },
+  userRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: '#F8FAFC',
     borderWidth: 1,
+    borderColor: '#E2E8F0',
+    borderRadius: RADIUS.md,
+    padding: 10,
+    marginBottom: 6,
+  },
+  userRowChecked: {
+    backgroundColor: '#EEF2FF',
     borderColor: '#C7D2FE',
   },
-  modalCopyBtnActive: {
-    backgroundColor: '#16A34A',
-    borderColor: '#16A34A',
+  userRowInfo: {
+    flex: 1,
   },
-  modalCopyBtnText: {
+  userNameText: {
     fontSize: 13,
     fontWeight: '700',
-    color: COLORS.primaryNavy,
+    color: COLORS.textDark,
   },
-  modalShareBtn: {
-    backgroundColor: COLORS.primaryNavy,
+  userEmailText: {
+    fontSize: 11,
+    color: COLORS.textMuted,
+    marginTop: 2,
   },
-  modalShareBtnText: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: '#FFFFFF',
+  checkbox: {
+    width: 20,
+    height: 20,
+    borderRadius: 5,
+    borderWidth: 1.5,
+    borderColor: '#94A3B8',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: COLORS.bgWhite,
+  },
+  checkboxChecked: {
+    backgroundColor: '#4F46E5',
+    borderColor: '#4F46E5',
   },
 });

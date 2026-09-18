@@ -280,7 +280,7 @@ export const InternalChatDetailScreen: React.FC = () => {
     return () => {
       clearActiveChat();
     };
-  }, [clearActiveChat]);
+  }, []);
 
   const groupedMessages = React.useMemo(() => groupMessagesByDate(messages), [messages]);
 

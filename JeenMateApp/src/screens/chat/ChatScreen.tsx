@@ -46,7 +46,23 @@ export const ChatScreen: React.FC = () => {
     clearMessages,
   } = useChatStore();
 
-  const { isConnected, fetchStatus: fetchWhatsAppStatus } = useWhatsAppStore();
+  const {
+    accounts,
+    selectedAccount,
+    selectedAccountId,
+    fetchAccounts,
+    selectAccount,
+  } = useWhatsAppStore();
+
+  const currentAccountType = selectedAccount?.account_type || 'PERSONAL';
+  const availableAccounts = React.useMemo(() => {
+    return accounts.filter(
+      (a) => a.account_type === currentAccountType && (a.status === 'online' || a.is_connected || a.phone_number)
+    );
+  }, [accounts, currentAccountType]);
+  const [showAccountPickerModal, setShowAccountPickerModal] = useState(false);
+
+  const isConnected = selectedAccount ? (selectedAccount.status === 'online' || selectedAccount.is_connected) : false;
 
   const [refreshing, setRefreshing] = useState(false);
   const [visibleCount, setVisibleCount] = useState(50);
@@ -56,39 +72,31 @@ export const ChatScreen: React.FC = () => {
     setVisibleCount(50);
   }, [searchQuery]);
 
+  // Setup socket listener once on mount
   useEffect(() => {
-    let isMounted = true;
-    const init = async () => {
-      setIsInitialLoad(true);
-      await Promise.all([fetchWhatsAppStatus(), fetchConversations()]);
-      if (isMounted) {
-        setIsInitialLoad(false);
-      }
-      setupSocketListeners();
-    };
-    init();
-    return () => {
-      isMounted = false;
-    };
-  }, [fetchWhatsAppStatus, fetchConversations, setupSocketListeners]);
+    setupSocketListeners();
+  }, [setupSocketListeners]);
 
   useFocusEffect(
     useCallback(() => {
       let isMounted = true;
-      Promise.all([fetchWhatsAppStatus(), fetchConversations()]).finally(() => {
-        if (isMounted) {
-          setIsInitialLoad(false);
-        }
-      });
+      fetchAccounts()
+        .then(() => fetchConversations(useWhatsAppStore.getState().selectedAccountId || undefined))
+        .finally(() => {
+          if (isMounted) {
+            setIsInitialLoad(false);
+          }
+        });
       return () => {
         isMounted = false;
       };
-    }, [fetchWhatsAppStatus, fetchConversations])
+    }, [fetchAccounts, fetchConversations])
   );
 
   const onRefresh = async () => {
     setRefreshing(true);
-    await Promise.all([fetchWhatsAppStatus(), fetchConversations()]);
+    await fetchAccounts();
+    await fetchConversations(selectedAccountId || undefined);
     setVisibleCount(50);
     setRefreshing(false);
   };
@@ -386,7 +394,8 @@ export const ChatScreen: React.FC = () => {
     <View style={styles.container}>
       {/* Reusable Top Header */}
       <Header
-        title="WhatsApp Chats"
+        title={selectedAccount ? (selectedAccount.whatsapp_name || selectedAccount.account_name) : 'WhatsApp Chats'}
+        subtitle={selectedAccount ? `${selectedAccount.account_type === 'PERSONAL' ? 'Personal WhatsApp' : 'Team WhatsApp'}${selectedAccount.phone_number ? ' • +' + selectedAccount.phone_number.replace('+', '') : ''}` : undefined}
         onBack={() => {
           if (navigation.canGoBack()) {
             navigation.goBack();
@@ -394,6 +403,7 @@ export const ChatScreen: React.FC = () => {
             navigation.navigate('ChatSelect');
           }
         }}
+       
       />
 
       {/* If WhatsApp is disconnected, don't show chat list; show "Please link your device" */}
@@ -423,6 +433,38 @@ export const ChatScreen: React.FC = () => {
         </View>
       ) : (
         <>
+          {/* Account Switcher Banner if user has multiple accounts */}
+          {availableAccounts.length > 1 && (
+            <View style={styles.accountSwitcherCard}>
+              <View style={styles.accountSwitcherLeft}>
+                <View style={styles.accountSwitcherIcon}>
+                  <Icon
+                    name={currentAccountType === 'TEAM' ? 'users' : 'whatsapp'}
+                    size={16}
+                    color={COLORS.whatsappGreen}
+                  />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.accountSwitcherName} numberOfLines={1}>
+                    {selectedAccount?.whatsapp_name || selectedAccount?.account_name || (currentAccountType === 'TEAM' ? 'Team WhatsApp' : 'Personal WhatsApp')}
+                  </Text>
+                  <Text style={styles.accountSwitcherPhone} numberOfLines={1}>
+                    {selectedAccount?.phone_number ? `+${selectedAccount.phone_number.replace('+', '')}` : 'Active'}
+                  </Text>
+                </View>
+              </View>
+
+              <TouchableOpacity
+                style={styles.switchAccountBtn}
+                onPress={() => setShowAccountPickerModal(true)}
+                activeOpacity={0.7}
+              >
+                <Text style={styles.switchAccountBtnText}>Switch</Text>
+                <Icon name="chevron-down" size={13} color={COLORS.primary} strokeWidth={2.5} />
+              </TouchableOpacity>
+            </View>
+          )}
+
           {/* Search Bar & Sync Action */}
           <View style={styles.searchContainer}>
             <View style={styles.searchWrapper}>
@@ -462,6 +504,11 @@ export const ChatScreen: React.FC = () => {
             keyExtractor={(item) => item.id}
             renderItem={renderItem}
             contentContainerStyle={styles.listContent}
+            initialNumToRender={15}
+            maxToRenderPerBatch={15}
+            windowSize={7}
+            removeClippedSubviews={Platform.OS === 'android'}
+            getItemLayout={(_, index) => ({ length: 77, offset: 77 * index, index })}
             refreshControl={
               <RefreshControl refreshing={refreshing} onRefresh={onRefresh} colors={[COLORS.primary]} />
             }
@@ -789,6 +836,79 @@ export const ChatScreen: React.FC = () => {
             )}
           </View>
         </KeyboardAvoidingView>
+      </Modal>
+
+      {/* MODAL: SELECT WHATSAPP ACCOUNT */}
+      <Modal visible={showAccountPickerModal} transparent animationType="slide">
+        <View style={styles.pickerModalOverlay}>
+          <View style={styles.pickerModalContent}>
+            <View style={styles.pickerModalHeader}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                <View style={styles.pickerHeaderIconBox}>
+                  <Icon
+                    name={currentAccountType === 'TEAM' ? 'users' : 'user'}
+                    size={16}
+                    color={COLORS.primary}
+                  />
+                </View>
+                <Text style={styles.pickerModalTitle}>
+                  Select {currentAccountType === 'TEAM' ? 'Team' : 'Personal'} WhatsApp
+                </Text>
+              </View>
+              <TouchableOpacity onPress={() => setShowAccountPickerModal(false)}>
+                <Icon name="x" size={22} color={COLORS.textMuted} />
+              </TouchableOpacity>
+            </View>
+
+            <Text style={styles.pickerModalSubtitle}>
+              Select which connected {currentAccountType === 'TEAM' ? 'Team' : 'Personal'} WhatsApp account to view chats:
+            </Text>
+
+            <ScrollView style={{ maxHeight: 340 }} showsVerticalScrollIndicator={false}>
+              {availableAccounts.map((acc, index) => {
+                const isSelected = selectedAccount?.id === acc.id;
+                const accName = acc.whatsapp_name || acc.account_name || `Account ${index + 1}`;
+                const accPhone = acc.phone_number ? `+${acc.phone_number.replace('+', '')}` : 'Active';
+                return (
+                  <TouchableOpacity
+                    key={acc.id}
+                    style={[styles.pickerAccountOption, isSelected && styles.pickerAccountOptionSelected]}
+                    onPress={async () => {
+                      setShowAccountPickerModal(false);
+                      await selectAccount(acc);
+                    }}
+                    activeOpacity={0.7}
+                  >
+                    <View style={styles.pickerAccLeft}>
+                      <View style={[styles.pickerAccIcon, isSelected && styles.pickerAccIconSelected]}>
+                        <Icon name="whatsapp" size={18} color={isSelected ? COLORS.whatsappGreen : '#64748B'} />
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <Text style={[styles.pickerAccName, isSelected && styles.pickerAccNameSelected]}>
+                          {index + 1}) Name : {accName}
+                        </Text>
+                        <Text style={styles.pickerAccPhone}>Phone Number : {accPhone}</Text>
+                      </View>
+                    </View>
+                    {isSelected && (
+                      <View style={styles.pickerCheckCircle}>
+                        <Icon name="check" size={12} color={COLORS.bgWhite} strokeWidth={3} />
+                      </View>
+                    )}
+                  </TouchableOpacity>
+                );
+              })}
+            </ScrollView>
+
+            <TouchableOpacity
+              style={styles.pickerCloseBtn}
+              onPress={() => setShowAccountPickerModal(false)}
+              activeOpacity={0.8}
+            >
+              <Text style={styles.pickerCloseBtnText}>Close</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
       </Modal>
     </View>
   );
@@ -1248,5 +1368,172 @@ const styles = StyleSheet.create({
     paddingVertical: 16,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+
+  // ACCOUNT SWITCHER CARD
+  accountSwitcherCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: '#F0FDF4',
+    borderRadius: RADIUS.lg,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    marginHorizontal: SPACING.lg,
+    marginTop: SPACING.sm,
+    marginBottom: 4,
+    borderWidth: 1,
+    borderColor: '#BBF7D0',
+  },
+  accountSwitcherLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    flex: 1,
+  },
+  accountSwitcherIcon: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: '#DCFCE7',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  accountSwitcherName: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: '#14532D',
+  },
+  accountSwitcherPhone: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#16A34A',
+    marginTop: 1,
+  },
+  switchAccountBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: COLORS.bgWhite,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: RADIUS.md,
+    borderWidth: 1,
+    borderColor: '#BFDBFE',
+    marginLeft: 8,
+  },
+  switchAccountBtnText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: COLORS.primary,
+  },
+
+  // PICKER MODAL STYLES
+  pickerModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(15, 23, 42, 0.55)',
+    justifyContent: 'flex-end',
+  },
+  pickerModalContent: {
+    backgroundColor: COLORS.bgWhite,
+    borderTopLeftRadius: RADIUS.xl,
+    borderTopRightRadius: RADIUS.xl,
+    padding: SPACING.lg,
+    paddingBottom: Platform.OS === 'android' ? 44 : 34,
+    maxHeight: '88%',
+  },
+  pickerModalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 4,
+  },
+  pickerHeaderIconBox: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    backgroundColor: '#EFF6FF',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  pickerModalTitle: {
+    fontSize: 16,
+    fontWeight: '800',
+    color: COLORS.primaryNavy,
+  },
+  pickerModalSubtitle: {
+    fontSize: 12,
+    color: COLORS.textMuted,
+    lineHeight: 18,
+    marginTop: 4,
+    marginBottom: 14,
+  },
+  pickerAccountOption: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    padding: 12,
+    borderRadius: RADIUS.md,
+    backgroundColor: '#F8FAFC',
+    marginBottom: 8,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+  },
+  pickerAccountOptionSelected: {
+    borderColor: COLORS.whatsappGreen,
+    backgroundColor: '#ECFDF5',
+  },
+  pickerAccLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    flex: 1,
+  },
+  pickerAccIcon: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: '#F1F5F9',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  pickerAccIconSelected: {
+    backgroundColor: '#DCFCE7',
+  },
+  pickerAccName: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: COLORS.textDark,
+  },
+  pickerAccNameSelected: {
+    color: '#065F46',
+  },
+  pickerAccPhone: {
+    fontSize: 12,
+    color: '#64748B',
+    marginTop: 2,
+  },
+  pickerCheckCircle: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: '#059669',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginLeft: 8,
+  },
+  pickerCloseBtn: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 12,
+    backgroundColor: '#F1F5F9',
+    borderRadius: RADIUS.md,
+    marginTop: 10,
+    marginBottom: Platform.OS === 'android' ? 10 : 0,
+  },
+  pickerCloseBtnText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: COLORS.textMuted,
   },
 });

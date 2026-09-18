@@ -21,13 +21,13 @@ const navTheme = {
 const Stack = createNativeStackNavigator();
 
 export const RootNavigator: React.FC = () => {
-  const { isAuthenticated, isLoading, initAuth } = useAuthStore();
+  const { isAuthenticated, isInitializing, initAuth } = useAuthStore();
 
   useEffect(() => {
     initAuth();
-  }, [initAuth]);
+  }, []);
 
-  if (isLoading) {
+  if (isInitializing) {
     return (
       <View
         style={{

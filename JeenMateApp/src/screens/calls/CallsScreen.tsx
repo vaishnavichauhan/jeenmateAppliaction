@@ -23,7 +23,7 @@ import { Icon } from '../../components/common/Icon';
 import { Header } from '../../components/common/Header';
 import { useTaskStore, TeamMember, TaskEventType } from '../../store/taskStore';
 import { useAuthStore } from '../../store/authStore';
-import { useWhatsAppStore } from '../../store/whatsappStore';
+import { useWhatsAppStore, WhatsAppAccount } from '../../store/whatsappStore';
 import apiClient from '../../services/api';
 import {
   fetchAndroidCallLogs,
@@ -326,15 +326,22 @@ export const CallsScreen: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'whatsapp' | 'phone'>('whatsapp');
   const [searchQuery, setSearchQuery] = useState('');
 
-  // Call Logs state
-  const { isConnected: isStoreConnected, fetchStatus: fetchWhatsAppStatus } = useWhatsAppStore();
-  const [isWaConnectedApi, setIsWaConnectedApi] = useState<boolean | null>(null);
-  const isWhatsAppConnected = isWaConnectedApi !== null ? isWaConnectedApi : isStoreConnected;
+  // Personal WhatsApp accounts state
+  const { accounts, fetchAccounts } = useWhatsAppStore();
+  const personalAccounts = React.useMemo(() => {
+    return accounts.filter(
+      (a) => a.account_type === 'PERSONAL' && (a.status === 'online' || a.is_connected || a.phone_number)
+    );
+  }, [accounts]);
+  const [selectedPersonalAccount, setSelectedPersonalAccount] = useState<WhatsAppAccount | null>(null);
+  const [showPersonalPickerModal, setShowPersonalPickerModal] = useState<boolean>(false);
+  const isWhatsAppConnected = personalAccounts.length > 0;
 
   const [realPhoneCalls, setRealPhoneCalls] = useState<CallLogItem[]>([]);
   const [liveWhatsAppCalls, setLiveWhatsAppCalls] = useState<CallLogItem[]>([]);
   const [isSyncingCalls, setIsSyncingCalls] = useState<boolean>(false);
   const [isFetchingWACalls, setIsFetchingWACalls] = useState<boolean>(false);
+  const [isPullRefreshingWA, setIsPullRefreshingWA] = useState<boolean>(false);
 
   // CRM Task Modal
   const [taskModalVisible, setTaskModalVisible] = useState(false);
@@ -399,98 +406,93 @@ export const CallsScreen: React.FC = () => {
     return true;
   });
 
-  const loadWhatsAppCalls = async () => {
+  const loadWhatsAppCalls = async (overrideAccountId?: number) => {
+    const targetId = overrideAccountId || selectedPersonalAccount?.id || (personalAccounts.length > 0 ? personalAccounts[0].id : null);
+    if (!targetId) {
+      setLiveWhatsAppCalls([]);
+      return;
+    }
+
     setIsFetchingWACalls(true);
+    setLiveWhatsAppCalls([]);
     try {
-      const res = await apiClient.get('/api/whatsapp/call-logs');
+      const endpoint = `/api/whatsapp/accounts/${targetId}/call-logs`;
+      const res = await apiClient.get(endpoint);
       if (res.data && res.data.success) {
-        if (res.data.isConnected !== undefined) {
-          setIsWaConnectedApi(!!res.data.isConnected);
-        }
-        if (!res.data.isConnected) {
-          setLiveWhatsAppCalls([]);
-          return;
-        }
 
         if (Array.isArray(res.data.data)) {
           const formatted: CallLogItem[] = res.data.data.map((item: any) => {
-          const rawCall = item.rawCall || {
-            id: item.id || item.callId,
-            from: item.phoneNumber,
-            timestamp: item.timestamp,
-            isGroup: false,
-            isVideo: item.isVideo === true,
-            isVideoCall: item.isVideoCall === true,
-            isGroupCall: false,
-            canHandleLocally: true,
-          };
+            const rawCall = item.rawCall || {
+              id: item.id || item.callId,
+              from: item.phoneNumber,
+              timestamp: item.timestamp,
+              isGroup: false,
+              isVideo: item.isVideo === true,
+              isVideoCall: item.isVideoCall === true,
+              isGroupCall: false,
+              canHandleLocally: true,
+            };
 
-          const isVideo = !!(
-            rawCall?.isVideo === true ||
-            rawCall?.isVideoCall === true ||
-            (rawCall?._data && (rawCall._data.isVideo === true || rawCall._data.isVideoCall === true)) ||
-            item.isVideo === true ||
-            item.isVideoCall === true ||
-            String(item.mediaType || item.media_type || '').toLowerCase() === 'video' ||
-            String(rawCall?.offerType || '').toLowerCase() === 'video' ||
-            String(rawCall?.subtype || rawCall?._data?.subtype || '').toLowerCase().includes('video')
-          );
+            const isVideo = !!(
+              rawCall?.isVideo === true ||
+              rawCall?.isVideoCall === true ||
+              (rawCall?._data && (rawCall._data.isVideo === true || rawCall._data.isVideoCall === true)) ||
+              item.isVideo === true ||
+              item.isVideoCall === true ||
+              String(item.mediaType || item.media_type || '').toLowerCase() === 'video' ||
+              String(rawCall?.offerType || '').toLowerCase() === 'video' ||
+              String(rawCall?.subtype || rawCall?._data?.subtype || '').toLowerCase().includes('video')
+            );
 
-          const mediaType: 'voice' | 'video' = isVideo ? 'video' : 'voice';
+            const mediaType: 'voice' | 'video' = isVideo ? 'video' : 'voice';
+            const parsedInitial = parseCallDate(rawCall?.timestamp || item.timestamp);
+            const rawTimestamp = item.rawTimestamp || (parsedInitial.getTime() > 0 ? parsedInitial.getTime() : undefined);
 
-          console.log("RAW WHATSAPP CALL:", rawCall);
-          console.log("IS VIDEO:", rawCall?.isVideo);
-          console.log("IS VIDEO CALL:", rawCall?.isVideoCall);
-          console.log("NORMALIZED MEDIA TYPE:", mediaType);
-
-          const parsedInitial = parseCallDate(rawCall?.timestamp || item.timestamp);
-          const rawTimestamp = item.rawTimestamp || (parsedInitial.getTime() > 0 ? parsedInitial.getTime() : undefined);
-
-          return {
-            id: `wa_call_${item.id || item.callId}`,
-            customerName: item.customerName || item.phoneNumber || 'Customer',
-            phoneNumber: item.phoneNumber || '',
-            callType: (item.callType || 'incoming').toLowerCase() as 'incoming' | 'outgoing' | 'missed',
-            status: item.status || (item.callType === 'missed' ? 'missed' : 'unknown'),
-            mediaType: mediaType,
-            timestamp: item.timestamp,
-            duration: item.duration !== null && item.duration !== undefined ? item.duration : undefined,
-            isVideo: isVideo,
-            isVideoCall: isVideo,
-            rawCall: rawCall,
-            rawTimestamp: rawTimestamp,
-          };
-        });
-
-        const uniqueFormatted: CallLogItem[] = [];
-        formatted.forEach((item) => {
-          const itemPhone = item.phoneNumber.replace(/[^0-9]/g, '');
-          const itemTime = (item.rawTimestamp && item.rawTimestamp > 0)
-            ? item.rawTimestamp
-            : parseCallDate(item.timestamp).getTime();
-          const itemBaseId = String(item.id).replace(/^(wa_call_|msg_call_\d+_)/, '');
-
-          const isDup = uniqueFormatted.some((u) => {
-            const uPhone = u.phoneNumber.replace(/[^0-9]/g, '');
-            const uTime = (u.rawTimestamp && u.rawTimestamp > 0)
-              ? u.rawTimestamp
-              : parseCallDate(u.timestamp).getTime();
-            const uBaseId = String(u.id).replace(/^(wa_call_|msg_call_\d+_)/, '');
-
-            const sameBaseId = !!(itemBaseId && uBaseId && (itemBaseId === uBaseId || itemBaseId.includes(uBaseId) || uBaseId.includes(itemBaseId)));
-            const exactSameEvent = !!(itemPhone && uPhone && itemPhone === uPhone && item.callType === u.callType && itemTime === uTime);
-            return sameBaseId || exactSameEvent;
+            return {
+              id: `wa_call_${item.id || item.callId}`,
+              customerName: item.customerName || item.phoneNumber || 'Customer',
+              phoneNumber: item.phoneNumber || '',
+              callType: (item.callType || 'incoming').toLowerCase() as 'incoming' | 'outgoing' | 'missed',
+              status: item.status || (item.callType === 'missed' ? 'missed' : 'unknown'),
+              mediaType: mediaType,
+              timestamp: item.timestamp,
+              duration: item.duration !== null && item.duration !== undefined ? item.duration : undefined,
+              isVideo: isVideo,
+              isVideoCall: isVideo,
+              rawCall: rawCall,
+              rawTimestamp: rawTimestamp,
+            };
           });
 
-          if (!isDup) {
-            uniqueFormatted.push(item);
-          }
-        });
+          const uniqueFormatted: CallLogItem[] = [];
+          formatted.forEach((item) => {
+            const itemPhone = item.phoneNumber.replace(/[^0-9]/g, '');
+            const itemTime = (item.rawTimestamp && item.rawTimestamp > 0)
+              ? item.rawTimestamp
+              : parseCallDate(item.timestamp).getTime();
+            const itemBaseId = String(item.id).replace(/^(wa_call_|msg_call_\d+_)/, '');
 
-        setLiveWhatsAppCalls(uniqueFormatted);
+            const isDup = uniqueFormatted.some((u) => {
+              const uPhone = u.phoneNumber.replace(/[^0-9]/g, '');
+              const uTime = (u.rawTimestamp && u.rawTimestamp > 0)
+                ? u.rawTimestamp
+                : parseCallDate(u.timestamp).getTime();
+              const uBaseId = String(u.id).replace(/^(wa_call_|msg_call_\d+_)/, '');
+
+              const sameBaseId = !!(itemBaseId && uBaseId && (itemBaseId === uBaseId || itemBaseId.includes(uBaseId) || uBaseId.includes(itemBaseId)));
+              const exactSameEvent = !!(itemPhone && uPhone && itemPhone === uPhone && item.callType === u.callType && itemTime === uTime);
+              return sameBaseId || exactSameEvent;
+            });
+
+            if (!isDup) {
+              uniqueFormatted.push(item);
+            }
+          });
+
+          setLiveWhatsAppCalls(uniqueFormatted);
+        }
       }
-    }
-  } catch (e) {
+    } catch (e) {
       console.log('[CallsScreen] Error loading WhatsApp calls from API');
     } finally {
       setIsFetchingWACalls(false);
@@ -512,24 +514,32 @@ export const CallsScreen: React.FC = () => {
     }
   };
 
+  // Sync selectedPersonalAccount with personalAccounts list
   useEffect(() => {
-    fetchTeamMembers();
-    fetchWhatsAppStatus();
-    loadWhatsAppCalls();
-    if (Platform.OS === 'android') {
-      loadRealAndroidCalls();
+    if (personalAccounts.length > 0) {
+      const currentValid = selectedPersonalAccount && personalAccounts.some((a) => a.id === selectedPersonalAccount.id);
+      if (!currentValid) {
+        const nextAccount = personalAccounts[0];
+        setSelectedPersonalAccount(nextAccount);
+        loadWhatsAppCalls(nextAccount.id);
+      }
+    } else {
+      setSelectedPersonalAccount((prev) => (prev !== null ? null : prev));
+      setLiveWhatsAppCalls((prev) => (prev.length > 0 ? [] : prev));
     }
-  }, []);
+  }, [personalAccounts, selectedPersonalAccount?.id]);
 
   useFocusEffect(
     useCallback(() => {
       fetchTeamMembers();
-      fetchWhatsAppStatus();
-      loadWhatsAppCalls();
+      fetchAccounts();
+      if (selectedPersonalAccount?.id) {
+        loadWhatsAppCalls(selectedPersonalAccount.id);
+      }
       if (Platform.OS === 'android') {
         loadRealAndroidCalls();
       }
-    }, [])
+    }, [selectedPersonalAccount?.id, fetchTeamMembers, fetchAccounts])
   );
 
   const handleOpenTaskModal = (call: CallLogItem) => {
@@ -754,6 +764,12 @@ export const CallsScreen: React.FC = () => {
     );
   };
 
+  const onPullRefreshWA = async () => {
+    setIsPullRefreshingWA(true);
+    await loadWhatsAppCalls();
+    setIsPullRefreshingWA(false);
+  };
+
   return (
     <View style={styles.container}>
       {/* Reusable Top Header */}
@@ -835,8 +851,8 @@ export const CallsScreen: React.FC = () => {
             />
           ) : activeTab === 'whatsapp' ? (
             <RefreshControl
-              refreshing={isFetchingWACalls}
-              onRefresh={loadWhatsAppCalls}
+              refreshing={isPullRefreshingWA}
+              onRefresh={onPullRefreshWA}
               colors={[COLORS.primary]}
             />
           ) : undefined
@@ -844,44 +860,74 @@ export const CallsScreen: React.FC = () => {
       >
         {/* WHATSAPP CALLS LIST */}
         {activeTab === 'whatsapp' && (
-          !isWhatsAppConnected ? (
-            <View style={styles.disconnectedContainer}>
-              <View style={styles.disconnectedIconCircle}>
-                <Icon name="link" size={38} color={COLORS.primaryNavy} strokeWidth={2.2} />
-              </View>
-              <Text style={styles.disconnectedTitle}>Device Not Linked</Text>
-              <Text style={styles.disconnectedSub}>
-                Please link your WhatsApp account to view your WhatsApp call logs and history.
-              </Text>
+          <>
+            {/* Account Switcher Banner if user has multiple personal accounts */}
+            {personalAccounts.length > 1 && (
+              <View style={styles.accountSwitcherCard}>
+                <View style={styles.accountSwitcherLeft}>
+                  <View style={styles.accountSwitcherIcon}>
+                    <Icon name="whatsapp" size={16} color={COLORS.whatsappGreen} />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.accountSwitcherName} numberOfLines={1}>
+                      {selectedPersonalAccount?.whatsapp_name || selectedPersonalAccount?.account_name || 'Personal WhatsApp'}
+                    </Text>
+                    <Text style={styles.accountSwitcherPhone} numberOfLines={1}>
+                      {selectedPersonalAccount?.phone_number ? `+${selectedPersonalAccount.phone_number.replace('+', '')}` : 'Active'}
+                    </Text>
+                  </View>
+                </View>
 
-              <TouchableOpacity
-                style={styles.linkDeviceButton}
-                onPress={() => navigation.navigate('Link')}
-                activeOpacity={0.85}
-              >
-                <Icon name="link" size={18} color={COLORS.bgWhite} strokeWidth={2.5} />
-                <Text style={styles.linkDeviceButtonText}>Please Link Your Device</Text>
-              </TouchableOpacity>
-            </View>
-          ) : isFetchingWACalls && liveWhatsAppCalls.length === 0 ? (
-            <View style={styles.emptyBox}>
-              <ActivityIndicator size="small" color={COLORS.primary} />
-              <Text style={styles.emptyText}>Loading WhatsApp calls...</Text>
-            </View>
-          ) : waGrouped.sections.length === 0 ? (
-            <View style={styles.emptyBox}>
-              <Text style={styles.emptyTitleText}>No Data</Text>
-              <Text style={styles.emptyText}>No WhatsApp call history recorded</Text>
-            </View>
-          ) : (
-            waGrouped.sections.map((section) => (
-              <View key={`wa_sec_${section.title || 'all'}`} style={styles.sectionContainer}>
-                {section.data.map((item) =>
-                  renderCallCardItem(item, true, item.id === waGrouped.newestId)
-                )}
+                <TouchableOpacity
+                  style={styles.switchAccountBtn}
+                  onPress={() => setShowPersonalPickerModal(true)}
+                  activeOpacity={0.7}
+                >
+                  <Text style={styles.switchAccountBtnText}>Switch</Text>
+                  <Icon name="chevron-down" size={13} color={COLORS.primary} strokeWidth={2.5} />
+                </TouchableOpacity>
               </View>
-            ))
-          )
+            )}
+
+            {!isWhatsAppConnected ? (
+              <View style={styles.disconnectedContainer}>
+                <View style={styles.disconnectedIconCircle}>
+                  <Icon name="link" size={38} color={COLORS.primaryNavy} strokeWidth={2.2} />
+                </View>
+                <Text style={styles.disconnectedTitle}>Device Not Linked</Text>
+                <Text style={styles.disconnectedSub}>
+                  Please link your Personal WhatsApp account to view your WhatsApp call logs and history.
+                </Text>
+
+                <TouchableOpacity
+                  style={styles.linkDeviceButton}
+                  onPress={() => navigation.navigate('Link')}
+                  activeOpacity={0.85}
+                >
+                  <Icon name="link" size={18} color={COLORS.bgWhite} strokeWidth={2.5} />
+                  <Text style={styles.linkDeviceButtonText}>Please Link Your Device</Text>
+                </TouchableOpacity>
+              </View>
+            ) : isFetchingWACalls && !isPullRefreshingWA ? (
+              <View style={styles.emptyBox}>
+                <ActivityIndicator size="small" color={COLORS.primary} />
+                <Text style={styles.emptyText}>Loading WhatsApp calls...</Text>
+              </View>
+            ) : waGrouped.sections.length === 0 ? (
+              <View style={styles.emptyBox}>
+                <Text style={styles.emptyTitleText}>No Data</Text>
+                <Text style={styles.emptyText}>No WhatsApp call history recorded</Text>
+              </View>
+            ) : (
+              waGrouped.sections.map((section) => (
+                <View key={`wa_sec_${section.title || 'all'}`} style={styles.sectionContainer}>
+                  {section.data.map((item) =>
+                    renderCallCardItem(item, true, item.id === waGrouped.newestId)
+                  )}
+                </View>
+              ))
+            )}
+          </>
         )}
 
         {/* CELLULAR PHONE CALLS LIST */}
@@ -1260,6 +1306,75 @@ export const CallsScreen: React.FC = () => {
             )}
           </View>
         </KeyboardAvoidingView>
+      </Modal>
+
+      {/* MODAL: SELECT PERSONAL WHATSAPP ACCOUNT */}
+      <Modal visible={showPersonalPickerModal} transparent animationType="slide">
+        <View style={styles.pickerModalOverlay}>
+          <View style={styles.pickerModalContent}>
+            <View style={styles.pickerModalHeader}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                <View style={styles.pickerHeaderIconBox}>
+                  <Icon name="user" size={16} color={COLORS.primary} />
+                </View>
+                <Text style={styles.pickerModalTitle}>Select Personal WhatsApp</Text>
+              </View>
+              <TouchableOpacity onPress={() => setShowPersonalPickerModal(false)}>
+                <Icon name="x" size={22} color={COLORS.textMuted} />
+              </TouchableOpacity>
+            </View>
+
+            <Text style={styles.pickerModalSubtitle}>
+              Select which connected Personal WhatsApp account to view call logs:
+            </Text>
+
+            <ScrollView style={{ maxHeight: 340 }} showsVerticalScrollIndicator={false}>
+              {personalAccounts.map((acc, index) => {
+                const isSelected = selectedPersonalAccount?.id === acc.id;
+                const accName = acc.whatsapp_name || acc.account_name || user?.name || `Personal Account ${index + 1}`;
+                const accPhone = acc.phone_number ? `+${acc.phone_number.replace('+', '')}` : 'Active';
+                return (
+                  <TouchableOpacity
+                    key={acc.id}
+                    style={[styles.pickerAccountOption, isSelected && styles.pickerAccountOptionSelected]}
+                    onPress={() => {
+                      setShowPersonalPickerModal(false);
+                      setSelectedPersonalAccount(acc);
+                      setLiveWhatsAppCalls([]);
+                      loadWhatsAppCalls(acc.id);
+                    }}
+                    activeOpacity={0.7}
+                  >
+                    <View style={styles.pickerAccLeft}>
+                      <View style={[styles.pickerAccIcon, isSelected && styles.pickerAccIconSelected]}>
+                        <Icon name="whatsapp" size={18} color={isSelected ? COLORS.whatsappGreen : '#64748B'} />
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <Text style={[styles.pickerAccName, isSelected && styles.pickerAccNameSelected]}>
+                          {index + 1}) Name : {accName}
+                        </Text>
+                        <Text style={styles.pickerAccPhone}>Phone Number : {accPhone}</Text>
+                      </View>
+                    </View>
+                    {isSelected && (
+                      <View style={styles.pickerCheckCircle}>
+                        <Icon name="check" size={12} color={COLORS.bgWhite} strokeWidth={3} />
+                      </View>
+                    )}
+                  </TouchableOpacity>
+                );
+              })}
+            </ScrollView>
+
+            <TouchableOpacity
+              style={styles.pickerCloseBtn}
+              onPress={() => setShowPersonalPickerModal(false)}
+              activeOpacity={0.8}
+            >
+              <Text style={styles.pickerCloseBtnText}>Close</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
       </Modal>
     </View>
   );
@@ -1924,5 +2039,178 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '700',
     letterSpacing: 0.2,
+  },
+
+  // PERSONAL ACCOUNT SWITCHER BANNER
+  accountSwitcherCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: COLORS.bgWhite,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    marginHorizontal: SPACING.md,
+    marginBottom: 12,
+    borderRadius: RADIUS.lg,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.04,
+    shadowRadius: 4,
+    elevation: 1,
+  },
+  accountSwitcherLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    flex: 1,
+  },
+  accountSwitcherIcon: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: '#ECFDF5',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: '#A7F3D0',
+  },
+  accountSwitcherName: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: COLORS.primaryNavy,
+  },
+  accountSwitcherPhone: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#64748B',
+    marginTop: 1,
+  },
+  switchAccountBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: '#EFF6FF',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: RADIUS.md,
+    borderWidth: 1,
+    borderColor: '#BFDBFE',
+    marginLeft: 8,
+  },
+  switchAccountBtnText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: COLORS.primary,
+  },
+
+  // PICKER MODAL STYLES
+  pickerModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(15, 23, 42, 0.55)',
+    justifyContent: 'flex-end',
+  },
+  pickerModalContent: {
+    backgroundColor: COLORS.bgWhite,
+    borderTopLeftRadius: RADIUS.xl,
+    borderTopRightRadius: RADIUS.xl,
+    padding: SPACING.lg,
+    paddingBottom: Platform.OS === 'android' ? 44 : 34,
+    maxHeight: '88%',
+  },
+  pickerModalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 4,
+  },
+  pickerHeaderIconBox: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    backgroundColor: '#EFF6FF',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  pickerModalTitle: {
+    fontSize: 16,
+    fontWeight: '800',
+    color: COLORS.primaryNavy,
+  },
+  pickerModalSubtitle: {
+    fontSize: 12,
+    color: COLORS.textMuted,
+    lineHeight: 18,
+    marginTop: 4,
+    marginBottom: 14,
+  },
+  pickerAccountOption: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    padding: 12,
+    borderRadius: RADIUS.md,
+    backgroundColor: '#F8FAFC',
+    marginBottom: 8,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+  },
+  pickerAccountOptionSelected: {
+    borderColor: COLORS.whatsappGreen,
+    backgroundColor: '#ECFDF5',
+  },
+  pickerAccLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    flex: 1,
+  },
+  pickerAccIcon: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: '#F1F5F9',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  pickerAccIconSelected: {
+    backgroundColor: '#DCFCE7',
+  },
+  pickerAccName: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: COLORS.textDark,
+  },
+  pickerAccNameSelected: {
+    color: '#065F46',
+  },
+  pickerAccPhone: {
+    fontSize: 12,
+    color: '#64748B',
+    marginTop: 2,
+  },
+  pickerCheckCircle: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: '#059669',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginLeft: 8,
+  },
+  pickerCloseBtn: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 12,
+    backgroundColor: '#F1F5F9',
+    borderRadius: RADIUS.md,
+    marginTop: 10,
+    marginBottom: Platform.OS === 'android' ? 10 : 0,
+  },
+  pickerCloseBtnText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: COLORS.textMuted,
   },
 });

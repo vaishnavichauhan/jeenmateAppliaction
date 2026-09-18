@@ -83,12 +83,6 @@ interface TaskState {
 const STORAGE_KEY_TASKS = '@jeenmate_tasks_cache';
 const STORAGE_KEY_MEMBERS = '@jeenmate_team_members_cache';
 
-const DEFAULT_MEMBERS: TeamMember[] = [
-  { id: 4, name: 'Nakul', email: 'nakul@jeenmate.com', role: 'user', avatar: 'https://api.dicebear.com/7.x/initials/svg?seed=Nakul' },
-  { id: 1, name: 'Support Admin', email: 'admin@support.com', role: 'admin', avatar: 'https://api.dicebear.com/7.x/initials/svg?seed=Support%20Admin' },
-  { id: 3, name: 'tanamay', email: 'tanamay@jeenmate.com', role: 'user', avatar: 'https://api.dicebear.com/7.x/initials/svg?seed=tanamay' },
-];
-
 export const useTaskStore = create<TaskState>((set, get) => ({
   tasks: [],
   counts: {
@@ -97,7 +91,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
     assigned: 0,
     completed: 0,
   },
-  teamMembers: DEFAULT_MEMBERS,
+  teamMembers: [],
   filter: 'all',
   selectedCustomer: null,
   searchQuery: '',

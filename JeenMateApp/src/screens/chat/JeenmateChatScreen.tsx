@@ -31,12 +31,12 @@ export const JeenmateChatScreen: React.FC = () => {
 
   useEffect(() => {
     setupSocketListeners();
-  }, [setupSocketListeners]);
+  }, []);
 
   useFocusEffect(
     useCallback(() => {
       fetchColleagues();
-    }, [fetchColleagues])
+    }, [])
   );
 
   const onRefresh = async () => {

@@ -230,8 +230,6 @@ export const useInternalChatStore = create<InternalChatState>((set, get) => ({
   },
 
   setupSocketListeners: () => {
-    if (get().isSocketListening) return;
-
     const socket = getSocket();
     const { user } = useAuthStore.getState();
     if (user?.id) {
@@ -239,6 +237,7 @@ export const useInternalChatStore = create<InternalChatState>((set, get) => ({
     }
 
     // When a new message arrives in active room
+    socket.off('new_internal_message');
     socket.on('new_internal_message', (msg: InternalChatMessage) => {
       const { activeColleague, messages, colleagues } = get();
 
@@ -281,6 +280,7 @@ export const useInternalChatStore = create<InternalChatState>((set, get) => ({
     });
 
     // When inbox update arrives
+    socket.off('internal_inbox_update');
     socket.on('internal_inbox_update', (msg: InternalChatMessage) => {
       const { activeColleague, colleagues } = get();
       const otherUserId =
@@ -309,6 +309,7 @@ export const useInternalChatStore = create<InternalChatState>((set, get) => ({
     });
 
     // Typing indicators
+    socket.off('internal_user_typing');
     socket.on('internal_user_typing', ({ senderId }: { senderId: number }) => {
       const { activeColleague } = get();
       if (activeColleague && activeColleague.id === senderId) {
@@ -316,6 +317,7 @@ export const useInternalChatStore = create<InternalChatState>((set, get) => ({
       }
     });
 
+    socket.off('internal_user_stopped_typing');
     socket.on('internal_user_stopped_typing', ({ senderId }: { senderId: number }) => {
       const { activeColleague } = get();
       if (activeColleague && activeColleague.id === senderId) {

@@ -63,7 +63,7 @@ export const Header: React.FC<HeaderProps> = ({
           backgroundColor,
           paddingTop: Math.max(insets.top, 20) + 13,
           paddingBottom: children ? SPACING.md : SPACING.lg,
-          borderBottomWidth: hideBottomBorder ? 0 : 1,
+          borderBottomWidth: hideBottomBorder ? 0 : StyleSheet.hairlineWidth,
           borderBottomColor,
         },
         style,
@@ -108,7 +108,7 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.bgWhite,
     paddingHorizontal: SPACING.lg,
     paddingBottom: SPACING.lg,
-    borderBottomWidth: 1,
+    borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: COLORS.borderColor,
   },
   topRow: {

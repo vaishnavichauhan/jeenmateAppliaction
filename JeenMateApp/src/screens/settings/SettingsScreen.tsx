@@ -21,11 +21,19 @@ import { Header } from '../../components/common/Header';
 export const SettingsScreen: React.FC = () => {
   const navigation = useNavigation<any>();
   const { user, logout, createUser } = useAuthStore();
-  const { isConnected, phone, name, fetchStatus } = useWhatsAppStore();
+  const { accounts, fetchAccounts } = useWhatsAppStore();
+  const personalConnected = React.useMemo(() => accounts.filter(
+    (a) => a.account_type === 'PERSONAL' && (a.status === 'online' || a.is_connected || a.phone_number)
+  ), [accounts]);
+  const teamConnected = React.useMemo(() => accounts.filter(
+    (a) => a.account_type === 'TEAM' && (a.status === 'online' || a.is_connected || a.phone_number)
+  ), [accounts]);
+  const totalConnectedCount = personalConnected.length + teamConnected.length;
   const { teamMembers, fetchTeamMembers } = useTaskStore();
 
-  // User List Collapse/Expand State
-  const [isUserListExpanded, setIsUserListExpanded] = useState(true);
+  // Collapse/Expand States (collapsed by default when opening screen)
+  const [isWaExpanded, setIsWaExpanded] = useState(false);
+  const [isUserListExpanded, setIsUserListExpanded] = useState(false);
 
   // Add User Modal State
   const [showAddModal, setShowAddModal] = useState(false);
@@ -37,7 +45,7 @@ export const SettingsScreen: React.FC = () => {
 
   useEffect(() => {
     fetchTeamMembers();
-    fetchStatus();
+    fetchAccounts();
   }, []);
 
   const handleLogout = () => {
@@ -130,40 +138,121 @@ export const SettingsScreen: React.FC = () => {
           {/* 1. WhatsApp Connection Section */}
           <View style={styles.cardSection}>
             <View style={styles.cardHeaderRow}>
-              <View style={styles.cardHeaderLeft}>
+              <TouchableOpacity
+                style={styles.cardHeaderLeft}
+                onPress={() => setIsWaExpanded(!isWaExpanded)}
+                activeOpacity={0.7}
+              >
                 <View style={styles.cardHeaderIconBoxWA}>
                   <Icon name="phone" size={15} color={COLORS.whatsappGreen} />
                 </View>
                 <Text style={styles.cardSectionTitle}>WhatsApp Connection</Text>
-              </View>
-              <View style={[styles.waStatusBadge, isConnected ? styles.waStatusBadgeOnline : styles.waStatusBadgeOffline]}>
-                <View style={[styles.waDot, isConnected ? styles.waDotOnline : styles.waDotOffline]} />
-                <Text style={[styles.waStatusBadgeText, isConnected ? styles.waStatusBadgeTextOnline : styles.waStatusBadgeTextOffline]}>
-                  {isConnected ? 'Active' : 'Offline'}
-                </Text>
+              </TouchableOpacity>
+
+              <View style={styles.cardHeaderRight}>
+                <View
+                  style={[
+                    styles.waStatusBadge,
+                    totalConnectedCount > 0 ? styles.waStatusBadgeOnline : styles.waStatusBadgeOffline,
+                  ]}
+                >
+                  <View
+                    style={[
+                      styles.waDot,
+                      totalConnectedCount > 0 ? styles.waDotOnline : styles.waDotOffline,
+                    ]}
+                  />
+                  <Text
+                    style={[
+                      styles.waStatusBadgeText,
+                      totalConnectedCount > 0
+                        ? styles.waStatusBadgeTextOnline
+                        : styles.waStatusBadgeTextOffline,
+                    ]}
+                  >
+                    {totalConnectedCount > 0 ? `${totalConnectedCount} Active` : 'Offline'}
+                  </Text>
+                </View>
+
+                <TouchableOpacity
+                  style={styles.collapseArrowBtn}
+                  onPress={() => setIsWaExpanded(!isWaExpanded)}
+                  activeOpacity={0.7}
+                >
+                  <Icon
+                    name={isWaExpanded ? 'chevron-up' : 'chevron-down'}
+                    size={18}
+                    color={COLORS.textMuted}
+                  />
+                </TouchableOpacity>
               </View>
             </View>
 
-            <View style={styles.waInfoRow}>
-              <Text style={styles.waStatusLabel}>
-                {isConnected ? 'Connected & Active' : 'Offline / Not Linked'}
-              </Text>
-              <Text style={styles.waPhoneLabel}>
-                Linked Name: {name || ''}
-              </Text>
-              <Text style={styles.waPhoneLabel}>
-                {isConnected ? `Linked Phone: ${phone || 'Active'}` : 'Link WhatsApp to sync live customer chats'}
-              </Text>
-            </View>
+            {/* Collapsible WhatsApp Details */}
+            {isWaExpanded && (
+              <View style={{ marginTop: 4 }}>
+                {/* Personal WhatsApp Connected */}
+                <View style={styles.waGroupSection}>
+                  <Text style={styles.waGroupTitle}>Personal whatsapp connected:</Text>
+                  {personalConnected.length > 0 ? (
+                    personalConnected.map((acc, index) => {
+                      const accName = acc.whatsapp_name || acc.account_name || user?.name || 'Personal WhatsApp';
+                      const accPhone = acc.phone_number ? acc.phone_number.replace('+', '') : 'Connected';
+                      return (
+                        <View key={acc.id || index} style={styles.waConnectedItem}>
+                          <Text style={styles.waItemLine}>
+                            <Text style={styles.waItemIndex}>{index + 1}) </Text>
+                            <Text style={styles.waItemLabel}>Name : </Text>
+                            <Text style={styles.waItemValue}>{accName}</Text>
+                          </Text>
+                          <Text style={styles.waItemSubLine}>
+                            <Text style={styles.waItemLabel}>Phone Number : </Text>
+                            <Text style={styles.waItemValue}>{accPhone}</Text>
+                          </Text>
+                        </View>
+                      );
+                    })
+                  ) : (
+                    <Text style={styles.waEmptySubText}>No Personal WhatsApp connected</Text>
+                  )}
+                </View>
 
-            <TouchableOpacity
-              style={styles.cardActionRow}
-              onPress={() => navigation.navigate('Link')}
-              activeOpacity={0.7}
-            >
-              <Text style={styles.cardActionText}>Manage Session & QR Code</Text>
-              <Icon name="chevron-right" size={16} color={COLORS.primary} />
-            </TouchableOpacity>
+                {/* Team WhatsApp Connected */}
+                <View style={[styles.waGroupSection, { marginTop: 12 }]}>
+                  <Text style={styles.waGroupTitle}>Team whatsapp connected:</Text>
+                  {teamConnected.length > 0 ? (
+                    teamConnected.map((acc, index) => {
+                      const accName = acc.whatsapp_name || acc.account_name || 'Team WhatsApp';
+                      const accPhone = acc.phone_number ? acc.phone_number.replace('+', '') : 'Connected';
+                      return (
+                        <View key={acc.id || index} style={styles.waConnectedItem}>
+                          <Text style={styles.waItemLine}>
+                            <Text style={[styles.waItemIndex, { color: COLORS.primaryNavy }]}>{index + 1}) </Text>
+                            <Text style={styles.waItemLabel}>Name : </Text>
+                            <Text style={styles.waItemValue}>{accName}</Text>
+                          </Text>
+                          <Text style={styles.waItemSubLine}>
+                            <Text style={styles.waItemLabel}>Phone Number : </Text>
+                            <Text style={styles.waItemValue}>{accPhone}</Text>
+                          </Text>
+                        </View>
+                      );
+                    })
+                  ) : (
+                    <Text style={styles.waEmptySubText}>No Team WhatsApp connected</Text>
+                  )}
+                </View>
+
+                <TouchableOpacity
+                  style={styles.cardActionRow}
+                  onPress={() => navigation.navigate('Link')}
+                  activeOpacity={0.7}
+                >
+                  <Text style={styles.cardActionText}>Manage Session & QR Code</Text>
+                  <Icon name="chevron-right" size={16} color={COLORS.primary} />
+                </TouchableOpacity>
+              </View>
+            )}
           </View>
 
           {/* Divider Border Between Cards */}
@@ -475,7 +564,7 @@ export const SettingsScreen: React.FC = () => {
 const styles = StyleSheet.create({
   screenWrapper: {
     flex: 1,
-    backgroundColor: '#F8FAFC',
+    backgroundColor: COLORS.bg,
   },
   container: {
     padding: 16,
@@ -594,6 +683,11 @@ const styles = StyleSheet.create({
     gap: 10,
     flex: 1,
   },
+  cardHeaderRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
   cardHeaderIconBoxWA: {
     width: 28,
     height: 28,
@@ -633,10 +727,6 @@ const styles = StyleSheet.create({
   waStatusBadgeTextOffline: {
     color: '#B45309',
   },
-  waInfoRow: {
-    marginTop: 2,
-    marginBottom: 4,
-  },
   waDot: {
     width: 7,
     height: 7,
@@ -648,21 +738,51 @@ const styles = StyleSheet.create({
   waDotOffline: {
     backgroundColor: '#EAB308',
   },
-  waStatusLabel: {
+  waGroupSection: {
+    backgroundColor: '#F8FAFC',
+    borderRadius: RADIUS.md,
+    padding: 10,
+    marginTop: 6,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+  },
+  waGroupTitle: {
     fontSize: 13,
-    fontWeight: '700',
-    color: COLORS.textDark,
-  },
-  waNameLabel: {
-    fontSize: 12,
-    fontWeight: '700',
+    fontWeight: '800',
     color: COLORS.primaryNavy,
-    marginTop: 2,
+    marginBottom: 6,
   },
-  waPhoneLabel: {
-    fontSize: 11,
+  waConnectedItem: {
+    marginBottom: 8,
+    paddingLeft: 4,
+  },
+  waItemLine: {
+    fontSize: 12,
+    lineHeight: 18,
+  },
+  waItemSubLine: {
+    fontSize: 12,
+    lineHeight: 18,
+    paddingLeft: 16,
+  },
+  waItemIndex: {
+    fontWeight: '800',
+    color: COLORS.primaryNavy,
+  },
+  waItemLabel: {
+    fontWeight: '700',
+    color: '#64748B',
+  },
+  waItemValue: {
+    fontWeight: '800',
+    color: COLORS.primaryNavy,
+  },
+  waEmptySubText: {
+    fontSize: 12,
     color: COLORS.textMuted,
-    marginTop: 2,
+    fontStyle: 'italic',
+    paddingLeft: 4,
+    paddingVertical: 2,
   },
   cardActionRow: {
     flexDirection: 'row',

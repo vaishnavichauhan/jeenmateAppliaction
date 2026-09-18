@@ -17,6 +17,8 @@ interface AuthState {
   serverUrl: string;
   isAuthenticated: boolean;
   isLoading: boolean;
+  isInitializing: boolean;
+  isLoginSuccess: boolean;
   loginError: string | null;
 
   initAuth: () => Promise<void>;
@@ -45,12 +47,14 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   user: null,
   serverUrl: DEFAULT_SERVER_URL,
   isAuthenticated: false,
-  isLoading: true,
+  isLoading: false,
+  isInitializing: true,
+  isLoginSuccess: false,
   loginError: null,
 
   initAuth: async () => {
     try {
-      set({ isLoading: true });
+      set({ isInitializing: true });
       const [savedToken, savedUser, savedUrl] = await Promise.all([
         AsyncStorage.getItem(STORAGE_KEYS.TOKEN),
         AsyncStorage.getItem(STORAGE_KEYS.USER),
@@ -71,17 +75,19 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         user,
         serverUrl,
         isAuthenticated: !!token,
+        isInitializing: false,
         isLoading: false,
+        isLoginSuccess: false,
       });
     } catch (e) {
       console.warn('Failed to load auth storage', e);
-      set({ isLoading: false });
+      set({ isInitializing: false, isLoading: false, isLoginSuccess: false });
     }
   },
 
   login: async (email, password) => {
     const { serverUrl } = get();
-    set({ isLoading: true, loginError: null });
+    set({ isLoading: true, isLoginSuccess: false, loginError: null });
 
     try {
       const response = await axios.post(
@@ -100,9 +106,19 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         set({
           token,
           user,
-          isAuthenticated: true,
           isLoading: false,
+          isLoginSuccess: true,
           loginError: null,
+        });
+
+        // Show "Sign In Successful" state for 700ms before navigating to home
+        await new Promise<void>((resolve) => {
+          setTimeout(() => resolve(), 700);
+        });
+
+        set({
+          isAuthenticated: true,
+          isLoginSuccess: false,
         });
         return true;
       }
@@ -133,15 +149,26 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         set({
           token: fallbackToken,
           user: fallbackUser,
-          isAuthenticated: true,
           isLoading: false,
+          isLoginSuccess: true,
           loginError: null,
+        });
+
+        // Show "Sign In Successful" state for 700ms before navigating to home
+        await new Promise<void>((resolve) => {
+          setTimeout(() => resolve(), 700);
+        });
+
+        set({
+          isAuthenticated: true,
+          isLoginSuccess: false,
         });
         return true;
       }
 
       set({
         isLoading: false,
+        isLoginSuccess: false,
         loginError: errorMsg,
       });
       return false;

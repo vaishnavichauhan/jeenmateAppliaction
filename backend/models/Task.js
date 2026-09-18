@@ -60,10 +60,12 @@ const Task = {
 
   async getCounts(userId) {
     if (!userId) {
-      const [totalRows] = await pool.execute('SELECT COUNT(*) as count FROM tasks');
-      const [pendingRows] = await pool.execute("SELECT COUNT(*) as count FROM tasks WHERE status = 'pending'");
-      const [assignedRows] = await pool.execute("SELECT COUNT(*) as count FROM tasks WHERE assigned_to_id IS NOT NULL AND status != 'completed'");
-      const [completedRows] = await pool.execute("SELECT COUNT(*) as count FROM tasks WHERE status = 'completed'");
+      const [[totalRows], [pendingRows], [assignedRows], [completedRows]] = await Promise.all([
+        pool.execute('SELECT COUNT(*) as count FROM tasks'),
+        pool.execute("SELECT COUNT(*) as count FROM tasks WHERE status = 'pending'"),
+        pool.execute("SELECT COUNT(*) as count FROM tasks WHERE assigned_to_id IS NOT NULL AND status != 'completed'"),
+        pool.execute("SELECT COUNT(*) as count FROM tasks WHERE status = 'completed'")
+      ]);
       return {
         total: totalRows[0]?.count || 0,
         pending: pendingRows[0]?.count || 0,
@@ -72,41 +74,40 @@ const Task = {
       };
     }
 
-    const [pendingRows] = await pool.execute(
-      `SELECT COUNT(*) as count FROM tasks 
-       WHERE user_id = ? AND status = 'pending'`,
-      [userId]
-    );
-
-    const [assignedRows] = await pool.execute(
-      `SELECT COUNT(*) as count FROM tasks 
-       WHERE (
-         ((assigned_by_id = ? OR (created_by_id = ? AND assigned_to_id IS NOT NULL)) AND (user_id != ? OR assigned_to_id != ?))
-         OR (user_id = ? AND (
-           (assigned_by_id IS NOT NULL AND assigned_by_id != ?) OR 
-           (created_by_id IS NOT NULL AND created_by_id != ?)
-         ))
-       )
-       AND assigned_to_id IS NOT NULL
-       AND status != 'completed'`,
-      [userId, userId, userId, userId, userId, userId, userId]
-    );
-
-    const [completedRows] = await pool.execute(
-      `SELECT COUNT(*) as count FROM tasks 
-       WHERE (user_id = ? OR assigned_by_id = ? OR created_by_id = ?) 
-       AND status = 'completed'`,
-      [userId, userId, userId]
-    );
-
-    const [totalRows] = await pool.execute(
-      `SELECT COUNT(*) as count FROM tasks 
-       WHERE user_id = ? 
-          OR assigned_by_id = ? 
-          OR created_by_id = ?
-          OR assigned_to_id = ?`,
-      [userId, userId, userId, userId]
-    );
+    const [[pendingRows], [assignedRows], [completedRows], [totalRows]] = await Promise.all([
+      pool.execute(
+        `SELECT COUNT(*) as count FROM tasks 
+         WHERE user_id = ? AND status = 'pending'`,
+        [userId]
+      ),
+      pool.execute(
+        `SELECT COUNT(*) as count FROM tasks 
+         WHERE (
+           ((assigned_by_id = ? OR (created_by_id = ? AND assigned_to_id IS NOT NULL)) AND (user_id != ? OR assigned_to_id != ?))
+           OR (user_id = ? AND (
+             (assigned_by_id IS NOT NULL AND assigned_by_id != ?) OR 
+             (created_by_id IS NOT NULL AND created_by_id != ?)
+           ))
+         )
+         AND assigned_to_id IS NOT NULL
+         AND status != 'completed'`,
+        [userId, userId, userId, userId, userId, userId, userId]
+      ),
+      pool.execute(
+        `SELECT COUNT(*) as count FROM tasks 
+         WHERE (user_id = ? OR assigned_by_id = ? OR created_by_id = ?) 
+         AND status = 'completed'`,
+        [userId, userId, userId]
+      ),
+      pool.execute(
+        `SELECT COUNT(*) as count FROM tasks 
+         WHERE user_id = ? 
+            OR assigned_by_id = ? 
+            OR created_by_id = ?
+            OR assigned_to_id = ?`,
+        [userId, userId, userId, userId]
+      )
+    ]);
 
     return {
       total: totalRows[0]?.count || 0,

@@ -22,6 +22,7 @@ import { useTaskStore, CRMTask, TeamMember } from '../../store/taskStore';
 import { useAuthStore } from '../../store/authStore';
 import { COLORS, SPACING, RADIUS } from '../../constants/theme';
 import { Icon } from '../../components/common/Icon';
+import { JeenMateLogo } from '../../components/common/JeenMateLogo';
 
 export const HomeScreen: React.FC = () => {
   const insets = useSafeAreaInsets();
@@ -46,6 +47,7 @@ export const HomeScreen: React.FC = () => {
   } = useTaskStore();
 
   const [search, setSearch] = useState('');
+  const [isSearchFocused, setIsSearchFocused] = useState(false);
   const [showAddModal, setShowAddModal] = useState(false);
 
   // Assign task modal state
@@ -97,18 +99,18 @@ export const HomeScreen: React.FC = () => {
     const isVideo = msg.includes('[VIDEO]');
     let eventType = isVideo ? 'Video Call' : 'Phone Call';
     let eventIcon: 'video' | 'phone' = isVideo ? 'video' : 'phone';
-    let eventColor = '#2563EB';
+    let eventColor = COLORS.peacockMedium;
 
     const lower = msg.toLowerCase();
     if (lower.includes('missed call')) {
       eventType = isVideo ? 'Missed Video Call' : 'Missed Call';
-      eventColor = '#DC2626';
+      eventColor = COLORS.peacockDark;
     } else if (lower.includes('incoming call')) {
       eventType = isVideo ? 'Incoming Video Call' : 'Incoming Call';
-      eventColor = '#059669';
+      eventColor = COLORS.greenPrimary;
     } else if (lower.includes('outgoing call')) {
       eventType = isVideo ? 'Outgoing Video Call' : 'Outgoing Call';
-      eventColor = '#2563EB';
+      eventColor = COLORS.peacockMedium;
     }
 
     const timeMatch = msg.match(/at\s+(?:[0-9]{1,2}:[a-zA-Z]+,\s*)?([0-9]{1,2}:[0-9]{2}\s*(?:am|pm)?)/i);
@@ -139,7 +141,7 @@ export const HomeScreen: React.FC = () => {
           return {
             eventType: 'PhoneCall',
             eventIcon: (callInfo?.eventIcon || 'phone') as 'phone' | 'video' | 'whatsapp' | 'chat',
-            eventColor: callInfo?.eventColor || '#2563EB',
+            eventColor: callInfo?.eventColor || COLORS.peacockMedium,
             callDate: callInfo?.callDate || null,
             callTime: callInfo?.callTime || null,
             duration: callInfo?.duration || null,
@@ -150,7 +152,7 @@ export const HomeScreen: React.FC = () => {
           return {
             eventType: 'WhatsappCall',
             eventIcon: (callInfo?.eventIcon || 'phone') as 'phone' | 'video' | 'whatsapp' | 'chat',
-            eventColor: '#0D9488',
+            eventColor: COLORS.greenPrimary,
             callDate: callInfo?.callDate || null,
             callTime: callInfo?.callTime || null,
             duration: callInfo?.duration || null,
@@ -160,7 +162,7 @@ export const HomeScreen: React.FC = () => {
           return {
             eventType: 'WhatsappChat',
             eventIcon: 'whatsapp' as const,
-            eventColor: '#00A884',
+            eventColor: COLORS.greenPrimary,
             callDate: null,
             callTime: null,
             duration: null,
@@ -169,7 +171,7 @@ export const HomeScreen: React.FC = () => {
           return {
             eventType: 'JeenmateChat',
             eventIcon: 'chat' as const,
-            eventColor: '#7C3AED',
+            eventColor: COLORS.peacockDark,
             callDate: null,
             callTime: null,
             duration: null,
@@ -178,7 +180,7 @@ export const HomeScreen: React.FC = () => {
           return {
             eventType: 'Self',
             eventIcon: 'calendar' as const,
-            eventColor: '#D97706',
+            eventColor: COLORS.peacockMedium,
             callDate: null,
             callTime: null,
             duration: null,
@@ -187,7 +189,7 @@ export const HomeScreen: React.FC = () => {
           return {
             eventType: String(task.event_type),
             eventIcon: 'calendar' as const,
-            eventColor: '#64748B',
+            eventColor: COLORS.peacockMedium,
             callDate: null,
             callTime: null,
             duration: null,
@@ -208,7 +210,7 @@ export const HomeScreen: React.FC = () => {
       return {
         eventType: 'WhatsappChat',
         eventIcon: 'whatsapp' as const,
-        eventColor: '#00A884',
+        eventColor: COLORS.greenPrimary,
         callDate: null,
         callTime: null,
         duration: null,
@@ -219,7 +221,7 @@ export const HomeScreen: React.FC = () => {
       return {
         eventType: 'JeenmateChat',
         eventIcon: 'chat' as const,
-        eventColor: '#7C3AED',
+        eventColor: COLORS.peacockDark,
         callDate: null,
         callTime: null,
         duration: null,
@@ -229,7 +231,7 @@ export const HomeScreen: React.FC = () => {
     return {
       eventType: 'Self',
       eventIcon: 'calendar' as const,
-      eventColor: '#D97706',
+      eventColor: COLORS.peacockMedium,
       callDate: null,
       callTime: null,
       duration: null,
@@ -283,10 +285,6 @@ export const HomeScreen: React.FC = () => {
   const addModalScrollMaxHeight = addKeyboardHeight > 0
     ? Math.max(220, addScreenHeight - addKeyboardHeight - 160)
     : Math.min(540, addScreenHeight * 0.72);
-
-  useEffect(() => {
-    fetchTasks();
-  }, [fetchTasks]);
 
   useFocusEffect(
     useCallback(() => {
@@ -477,10 +475,10 @@ export const HomeScreen: React.FC = () => {
 
     const eventDescription = getCleanEventDescription();
     const { date: createdDate, time: createdTime } = formatDateTimeParts(item.created_at);
-    const eventColor = eventInfo?.eventColor || '#2563EB';
+    const eventColor = eventInfo?.eventColor || COLORS.peacockMedium;
 
     return (
-      <View style={[styles.taskCard, isDone && styles.taskCardCompleted, { borderLeftColor: isDone ? '#10B981' : eventColor }]}>
+      <View style={[styles.taskCard, isDone && styles.taskCardCompleted, { borderLeftColor: isDone ? COLORS.greenDark : eventColor }]}>
         {/* Top Accent Strip */}
         {/* <View style={[styles.taskAccentStrip, { backgroundColor: isDone ? '#10B981' : eventColor }]} /> */}
 
@@ -636,17 +634,20 @@ export const HomeScreen: React.FC = () => {
     <View style={styles.container}>
       {/* Header Bar */}
       <View style={[styles.header, { paddingTop: Math.max(insets.top, 20) + 12 }]}>
-        <View style={{ flex: 1 }}>
-          <Text style={styles.headerTitle}>JeenMate</Text>
-          <Text style={styles.headerGreeting}>
-            👋 Hello, <Text style={styles.headerUserName}>{user?.name || 'User'}</Text>
-          </Text>
+        {/* Left side: JeenMate Logo + Greeting */}
+        <View style={styles.headerLeftGroup}>
+          <JeenMateLogo size={42} />
+          <View style={{ marginLeft: 10, flex: 1 }}>
+            <Text style={styles.headerTitle}>JeenMate</Text>
+            <Text style={styles.headerGreeting} numberOfLines={1}>
+              👋 Hello, <Text style={styles.headerUserName}>{user?.name || 'User'}</Text>
+            </Text>
+          </View>
         </View>
-        {/* User Avatar */}
-        <View style={styles.userAvatarCircle}>
-          <Text style={styles.userAvatarText}>
-            {(user?.name || 'U').charAt(0).toUpperCase()}
-          </Text>
+
+        {/* Right side: Notification Icon (dont press / display only) */}
+        <View style={styles.headerNotificationBox} pointerEvents="none">
+          <Icon name="bell" size={22} color={COLORS.peacockDark} strokeWidth={2} />
         </View>
       </View>
 
@@ -675,50 +676,89 @@ export const HomeScreen: React.FC = () => {
 
       {/* Summary Metrics Chips (Pending, Assign, Completed, Total) */}
       <View style={styles.metricsContainer}>
+        {/* Pending Card */}
         <TouchableOpacity
-          style={[styles.metricCard, filter === 'pending' && styles.metricCardActive]}
+          style={[
+            styles.metricCard,
+            filter === 'pending' ? styles.metricCardPendingActive : styles.metricCardPending,
+          ]}
           onPress={() => setFilter('pending')}
+          activeOpacity={0.8}
         >
-          <Text style={[styles.metricNumber, { color: COLORS.primary }]}>{counts.pending}</Text>
-          <Text style={styles.metricLabel}>Pending</Text>
+          <Text style={[styles.metricNumber, { color: '#0369A1' }]}>{counts.pending}</Text>
+          <Text style={[styles.metricLabel, filter === 'pending' && { color: '#0369A1', fontWeight: '800' }]}>
+            Pending
+          </Text>
         </TouchableOpacity>
 
+        {/* Assign Card */}
         <TouchableOpacity
-          style={[styles.metricCard, filter === 'assigned' && styles.metricCardActive]}
+          style={[
+            styles.metricCard,
+            filter === 'assigned' ? styles.metricCardAssignActive : styles.metricCardAssign,
+          ]}
           onPress={() => setFilter('assigned')}
+          activeOpacity={0.8}
         >
-          <Text style={[styles.metricNumber, { color: '#8B5CF6' }]}>{counts.assigned || 0}</Text>
-          <Text style={styles.metricLabel}>Assign</Text>
+          <Text style={[styles.metricNumber, { color: '#4F46E5' }]}>{counts.assigned || 0}</Text>
+          <Text style={[styles.metricLabel, filter === 'assigned' && { color: '#4F46E5', fontWeight: '800' }]}>
+            Assign
+          </Text>
         </TouchableOpacity>
 
+        {/* Completed Card */}
         <TouchableOpacity
-          style={[styles.metricCard, filter === 'completed' && styles.metricCardActive]}
+          style={[
+            styles.metricCard,
+            filter === 'completed' ? styles.metricCardCompletedActive : styles.metricCardCompleted,
+          ]}
           onPress={() => setFilter('completed')}
+          activeOpacity={0.8}
         >
-          <Text style={[styles.metricNumber, { color: COLORS.whatsappGreen }]}>{counts.completed}</Text>
-          <Text style={styles.metricLabel}>Completed</Text>
+          <Text style={[styles.metricNumber, { color: '#047857' }]}>{counts.completed}</Text>
+          <Text style={[styles.metricLabel, filter === 'completed' && { color: '#047857', fontWeight: '800' }]}>
+            Completed
+          </Text>
         </TouchableOpacity>
 
+        {/* Total Card */}
         <TouchableOpacity
-          style={[styles.metricCard, filter === 'all' && styles.metricCardActive]}
+          style={[
+            styles.metricCard,
+            filter === 'all' ? styles.metricCardTotalActive : styles.metricCardTotal,
+          ]}
           onPress={() => setFilter('all')}
+          activeOpacity={0.8}
         >
-          <Text style={styles.metricNumber}>{counts.total}</Text>
-          <Text style={styles.metricLabel}>Total</Text>
+          <Text style={[styles.metricNumber, { color: COLORS.peacockDark }]}>{counts.total}</Text>
+          <Text style={[styles.metricLabel, filter === 'all' && { color: COLORS.peacockDark, fontWeight: '800' }]}>
+            Total
+          </Text>
         </TouchableOpacity>
       </View>
 
       {/* Search & Action Bar */}
       <View style={styles.searchBarContainer}>
-        <View style={styles.searchInputWrapper}>
-          <Icon name="search" size={16} color={COLORS.textMuted} />
+        <View style={[styles.searchInputWrapper, isSearchFocused && styles.searchInputWrapperFocused]}>
+          <Icon
+            name="search"
+            size={16}
+            color={isSearchFocused ? COLORS.peacockDark : COLORS.textMuted}
+          />
           <TextInput
             style={styles.searchInput}
             placeholder="Search tasks..."
             placeholderTextColor={COLORS.textSubtle}
             value={search}
             onChangeText={setSearch}
+            onFocus={() => setIsSearchFocused(true)}
+            onBlur={() => setIsSearchFocused(false)}
           />
+          {search ? (
+            <TouchableOpacity onPress={() => setSearch('')} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+              <Icon name="close" size={14} color={COLORS.textMuted} />
+            </TouchableOpacity>
+          ) : null}
         </View>
 
         {counts.completed > 0 ? (
@@ -767,7 +807,7 @@ export const HomeScreen: React.FC = () => {
           ) : (
             <View style={styles.emptyContainer}>
               <Icon name="check-double" size={44} color={COLORS.borderColor} />
-              <Text style={styles.emptyTitle}>No Data</Text>
+              {/* <Text style={styles.emptyTitle}>No Data</Text> */}
               <Text style={styles.emptySub}>
                 {search
                   ? 'No tasks matched your search query.'
@@ -1167,11 +1207,25 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    borderBottomWidth: 1,
+    borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: COLORS.borderColor,
   },
+  headerLeftGroup: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+    paddingRight: SPACING.md,
+  },
+  headerNotificationBox: {
+    width: 40,
+    height: 40,
+    borderRadius: RADIUS.md,
+    backgroundColor: COLORS.peacockLight,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   headerTitle: {
-    fontSize: 22,
+    fontSize: 20,
     fontWeight: '800',
     color: COLORS.primaryNavy,
   },
@@ -1234,29 +1288,24 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    backgroundColor: COLORS.bgWhite,
+    backgroundColor: COLORS.peacockLight,
     marginHorizontal: SPACING.lg,
     marginTop: SPACING.md,
-    padding: SPACING.md,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.md,
     borderRadius: RADIUS.lg,
-    borderWidth: 1,
-    borderColor: 'rgba(26, 59, 113, 0.12)',
-    shadowColor: COLORS.primary,
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.06,
-    shadowRadius: 6,
-    elevation: 2,
   },
   adminSectionLeft: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 12,
+    flex: 1,
   },
   adminIconBox: {
     width: 38,
     height: 38,
     borderRadius: RADIUS.md,
-    backgroundColor: 'rgba(26, 59, 113, 0.08)',
+    backgroundColor: COLORS.bgWhite,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -1292,34 +1341,84 @@ const styles = StyleSheet.create({
   },
   metricsContainer: {
     flexDirection: 'row',
-    paddingHorizontal: SPACING.md,
+    paddingHorizontal: SPACING.lg,
     paddingTop: SPACING.md,
-    gap: 6,
+    gap: 8,
   },
   metricCard: {
     flex: 1,
-    backgroundColor: COLORS.bgWhite,
-    borderRadius: RADIUS.md,
+    borderRadius: RADIUS.lg,
     paddingVertical: 10,
-    paddingHorizontal: 4,
+    paddingHorizontal: 6,
     alignItems: 'center',
+    justifyContent: 'center',
     borderWidth: 1.5,
-    borderColor: COLORS.borderColor,
   },
-  metricCardActive: {
-    borderColor: COLORS.primary,
-    backgroundColor: 'rgba(26, 59, 113, 0.05)',
+  metricTopRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    marginBottom: 2,
+  },
+  metricDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
   },
   metricNumber: {
-    fontSize: 17,
+    fontSize: 18,
     fontWeight: '800',
-    color: COLORS.textDark,
   },
   metricLabel: {
-    fontSize: 10,
+    fontSize: 11,
     fontWeight: '700',
     color: COLORS.textMuted,
     marginTop: 2,
+    textTransform: 'capitalize',
+  },
+
+  // Pending
+  metricCardPending: {
+    backgroundColor: '#F0F9FF',
+    borderColor: '#BAE6FD',
+  },
+  metricCardPendingActive: {
+    backgroundColor: '#E0F2FE',
+    borderColor: '#0284C7',
+    borderWidth: 2,
+  },
+
+  // Assign
+  metricCardAssign: {
+    backgroundColor: '#EEF2FF',
+    borderColor: '#C7D2FE',
+  },
+  metricCardAssignActive: {
+    backgroundColor: '#E0E7FF',
+    borderColor: '#4F46E5',
+    borderWidth: 2,
+  },
+
+  // Completed
+  metricCardCompleted: {
+    backgroundColor: '#E8FAF4',
+    borderColor: '#A7F3D0',
+  },
+  metricCardCompletedActive: {
+    backgroundColor: '#D1FAE5',
+    borderColor: '#047857',
+    borderWidth: 2,
+  },
+
+  // Total
+  metricCardTotal: {
+    backgroundColor: '#E6F4F6',
+    borderColor: '#B8E2E8',
+  },
+  metricCardTotalActive: {
+    backgroundColor: '#D1ECF1',
+    borderColor: '#004D5A',
+    borderWidth: 2,
   },
   searchBarContainer: {
     paddingHorizontal: SPACING.lg,
@@ -1336,9 +1435,14 @@ const styles = StyleSheet.create({
     borderRadius: RADIUS.md,
     paddingHorizontal: 12,
     height: 42,
-    borderWidth: 1,
+    borderWidth: 1.5,
     borderColor: COLORS.borderColor,
     gap: 8,
+  },
+  searchInputWrapperFocused: {
+    borderColor: COLORS.peacockDark,
+    borderWidth: 1.5,
+    backgroundColor: '#FFFFFF',
   },
   searchInput: {
     flex: 1,
@@ -1384,20 +1488,17 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.bgWhite,
     borderRadius: 16,
     marginBottom: 16,
-    borderWidth: 1,
-    borderLeftWidth: 1.5,
-    borderColor: '#E2E8F0',
+    borderLeftWidth: 2.5,
     shadowColor: '#0F172A',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.08,
-    shadowRadius: 10,
-    elevation: 3,
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.07,
+    shadowRadius: 8,
+    elevation: 2,
     overflow: 'hidden',
   },
   taskCardCompleted: {
     opacity: 0.8,
-    borderColor: '#A7F3D0',
-    borderLeftColor: '#10B981',
+    borderLeftColor: COLORS.greenDark,
   },
   taskAccentStrip: {
     // height: 1,

@@ -38,14 +38,7 @@ async function login(req, res, next) {
       { expiresIn: '30d' }
     );
 
-    // Auto-resume user's attached WhatsApp session in background
-    try {
-      const sessionManager = require('../services/sessionManager');
-      sessionManager.getOrCreateSession(user.id).catch((err) => {
-        console.log(`[Auth] WhatsApp session init notice for user ${user.id}:`, err.message);
-      });
-    } catch (_) {}
-
+    // Return user info and token upon login
     return res.status(200).json({
       success: true,
       message: 'Login successful',
