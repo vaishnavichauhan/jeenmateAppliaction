@@ -5,4 +5,7 @@ sessions/
 data/
 .env
 .DS_Store
+uploads/
+uploads/*
+!uploads/.gitkeep
 *.log

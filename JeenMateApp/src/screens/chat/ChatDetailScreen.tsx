@@ -17,16 +17,32 @@ import {
   StatusBar,
   RefreshControl,
   Linking,
+  PermissionsAndroid,
 } from 'react-native';
 import { useRoute, useNavigation } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useChatStore, ChatMessage } from '../../store/chatStore';
+import { launchCamera, launchImageLibrary } from 'react-native-image-picker';
+import DocumentPicker, { types as docTypes } from 'react-native-document-picker';
+import { useChatStore, ChatMessage, SendMediaPayload, SendImagePayload, deduplicateMessages, resolveMediaUrl } from '../../store/chatStore';
 import { useTaskStore, TeamMember } from '../../store/taskStore';
 import { useAuthStore } from '../../store/authStore';
 import { COLORS, SPACING, RADIUS } from '../../constants/theme';
 import { Icon } from '../../components/common/Icon';
 import apiClient from '../../services/api';
 
+export const formatFileSize = (bytes?: number): string => {
+  if (!bytes || bytes <= 0) return '';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+};
+
+export const formatDuration = (seconds?: number): string => {
+  if (!seconds || seconds <= 0) return '';
+  const mins = Math.floor(seconds / 60);
+  const secs = Math.floor(seconds % 60);
+  return `${mins}:${secs < 10 ? '0' : ''}${secs}`;
+};
 
 export type MessageListItem =
   | { type: 'date_header'; id: string; dateLabel: string }
@@ -85,20 +101,7 @@ const getDateHeaderLabel = (date: Date): string => {
 const groupMessagesByDate = (rawMessages: ChatMessage[]): MessageListItem[] => {
   if (!rawMessages || rawMessages.length === 0) return [];
 
-  // Sort chronologically (oldest first, newest at the bottom)
-  const sorted = [...rawMessages].sort((a, b) => {
-    const timeA = (a.whatsapp_timestamp && Number(a.whatsapp_timestamp) > 0)
-      ? Number(a.whatsapp_timestamp)
-      : (parseMessageDate(a.timestamp, a.whatsapp_timestamp)?.getTime() || 0);
-    const timeB = (b.whatsapp_timestamp && Number(b.whatsapp_timestamp) > 0)
-      ? Number(b.whatsapp_timestamp)
-      : (parseMessageDate(b.timestamp, b.whatsapp_timestamp)?.getTime() || 0);
-    if (timeA !== timeB) return timeA - timeB;
-    const idA = typeof a.id === 'number' ? a.id : parseInt(String(a.id), 10) || 0;
-    const idB = typeof b.id === 'number' ? b.id : parseInt(String(b.id), 10) || 0;
-    return idA - idB;
-  });
-
+  const sorted = deduplicateMessages(rawMessages);
   const listItems: MessageListItem[] = [];
   let lastDateKey = '';
 
@@ -132,6 +135,7 @@ export const ChatDetailScreen: React.FC = () => {
     messages,
     fetchMessages,
     fetchOlderMessages,
+    fetchConversations,
     hasMoreMessages,
     isLoadingOlder,
     sendMessage,
@@ -146,9 +150,13 @@ export const ChatDetailScreen: React.FC = () => {
 
   const [isInitialLoading, setIsInitialLoading] = useState(true);
   const [inputMessage, setInputMessage] = useState('');
+  const [selectedMedia, setSelectedMedia] = useState<SendMediaPayload | null>(null);
+  const selectedImage = selectedMedia;
+  const setSelectedImage = setSelectedMedia;
   const [isKeyboardVisible, setKeyboardVisible] = useState(false);
   const flatListRef = useRef<FlatList>(null);
   const isInitialScrollDone = useRef(false);
+  const isUserDragging = useRef(false);
 
   useEffect(() => {
     const showSub = Keyboard.addListener(
@@ -170,8 +178,23 @@ export const ChatDetailScreen: React.FC = () => {
     };
   }, []);
 
-  // Quick Task Modal
+  const [attachmentModalVisible, setAttachmentModalVisible] = useState(false);
   const [taskModalVisible, setTaskModalVisible] = useState(false);
+  const [selectedMediaModal, setSelectedMediaModal] = useState<{
+    visible: boolean;
+    type: 'image' | 'video' | 'document';
+    uri: string;
+    caption?: string;
+    filename?: string;
+    filesize?: number;
+    duration?: number;
+    ext?: string;
+  }>({
+    visible: false,
+    type: 'image',
+    uri: '',
+    caption: '',
+  });
   const [taskOriginalMessage, setTaskOriginalMessage] = useState('');
   const [taskStaffNote, setTaskStaffNote] = useState('');
   const [taskMessageDate, setTaskMessageDate] = useState('');
@@ -251,28 +274,268 @@ export const ChatDetailScreen: React.FC = () => {
 
   useEffect(() => {
     if (!isInitialLoading && groupedMessages.length > 0) {
-      requestAnimationFrame(() => {
+      const scrollDown = () => {
         flatListRef.current?.scrollToEnd({ animated: false });
-      });
-      const timer = setTimeout(() => {
-        flatListRef.current?.scrollToEnd({ animated: false });
+      };
+      scrollDown();
+      const t1 = setTimeout(scrollDown, 50);
+      const t2 = setTimeout(scrollDown, 150);
+      const t3 = setTimeout(() => {
+        scrollDown();
         isInitialScrollDone.current = true;
-      }, 50);
-      return () => clearTimeout(timer);
+      }, 400);
+      return () => {
+        clearTimeout(t1);
+        clearTimeout(t2);
+        clearTimeout(t3);
+      };
     }
-  }, [isInitialLoading, activeConvId]);
+  }, [isInitialLoading, activeConvId, groupedMessages.length]);
   
+  useEffect(() => {
+    return () => {
+      fetchConversations().catch(() => {});
+    };
+  }, [fetchConversations]);
+
   const handleLoadOlder = async () => {
     if (isLoadingOlder || !conversationId || !hasMoreMessages) return;
     await fetchOlderMessages(conversationId);
   };
 
+  const requestCameraPermission = async () => {
+    if (Platform.OS !== 'android') return true;
+    try {
+      const granted = await PermissionsAndroid.request(
+        PermissionsAndroid.PERMISSIONS.CAMERA,
+        {
+          title: 'Camera Permission',
+          message: 'JeenMate needs access to your camera to take and send photos.',
+          buttonPositive: 'OK',
+        }
+      );
+      return granted === PermissionsAndroid.RESULTS.GRANTED;
+    } catch (err) {
+      console.warn(err);
+      return false;
+    }
+  };
+
+  const requestGalleryPermission = async () => {
+    if (Platform.OS !== 'android') return true;
+    try {
+      if (Platform.Version >= 33) {
+        const granted = await PermissionsAndroid.request(
+          PermissionsAndroid.PERMISSIONS.READ_MEDIA_IMAGES
+        );
+        return granted === PermissionsAndroid.RESULTS.GRANTED;
+      } else {
+        const granted = await PermissionsAndroid.request(
+          PermissionsAndroid.PERMISSIONS.READ_EXTERNAL_STORAGE
+        );
+        return granted === PermissionsAndroid.RESULTS.GRANTED;
+      }
+    } catch (err) {
+      console.warn(err);
+      return false;
+    }
+  };
+
+const getBase64FromUri = async (uri: string): Promise<string> => {
+  try {
+    const response = await fetch(uri);
+    const blob = await response.blob();
+    return new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        const resStr = (reader.result as string) || '';
+        const b64 = resStr.includes(',') ? resStr.split(',')[1] : resStr;
+        resolve(b64);
+      };
+      reader.onerror = () => resolve('');
+      reader.readAsDataURL(blob);
+    });
+  } catch (_) {
+    return '';
+  }
+};
+
+  const handlePickCamera = async () => {
+    setAttachmentModalVisible(false);
+    const hasPermission = await requestCameraPermission();
+    if (!hasPermission) {
+      Alert.alert('Permission Required', 'Camera permission is needed to take a photo.');
+      return;
+    }
+
+    try {
+      const res = await launchCamera({
+        mediaType: 'photo',
+        quality: 0.8,
+        maxWidth: 1280,
+        maxHeight: 1280,
+        includeBase64: true,
+        saveToPhotos: false,
+      });
+
+      if (res.didCancel) return;
+      if (res.errorCode) {
+        Alert.alert('Camera Error', res.errorMessage || res.errorCode);
+        return;
+      }
+
+      if (res.assets && res.assets.length > 0) {
+        const asset = res.assets[0];
+        if (asset.uri) {
+          let b64 = asset.base64;
+          if (!b64) {
+            b64 = await getBase64FromUri(asset.uri);
+          }
+          setSelectedMedia({
+            mediaType: 'image',
+            uri: asset.uri,
+            base64: b64,
+            type: asset.type || 'image/jpeg',
+            fileName: asset.fileName || `photo_${Date.now()}.jpg`,
+            fileSize: asset.fileSize,
+          });
+        }
+      }
+    } catch (err: any) {
+      console.warn('[Camera] Error:', err);
+      Alert.alert('Error', err?.message || 'Failed to open camera');
+    }
+  };
+
+  const handlePickGallery = async () => {
+    setAttachmentModalVisible(false);
+    await requestGalleryPermission();
+
+    try {
+      const res = await launchImageLibrary({
+        mediaType: 'photo',
+        selectionLimit: 1,
+        quality: 0.8,
+        maxWidth: 1280,
+        maxHeight: 1280,
+        includeBase64: true,
+      });
+
+      if (res.didCancel) return;
+      if (res.errorCode) {
+        Alert.alert('Gallery Error', res.errorMessage || res.errorCode);
+        return;
+      }
+
+      if (res.assets && res.assets.length > 0) {
+        const asset = res.assets[0];
+        if (asset.uri) {
+          let b64 = asset.base64;
+          if (!b64) {
+            b64 = await getBase64FromUri(asset.uri);
+          }
+          setSelectedMedia({
+            mediaType: 'image',
+            uri: asset.uri,
+            base64: b64,
+            type: asset.type || 'image/jpeg',
+            fileName: asset.fileName || `image_${Date.now()}.jpg`,
+            fileSize: asset.fileSize,
+          });
+        }
+      }
+    } catch (err: any) {
+      console.warn('[Gallery] Error:', err);
+      Alert.alert('Error', err?.message || 'Failed to open photo gallery');
+    }
+  };
+
+  const handlePickVideo = async () => {
+    setAttachmentModalVisible(false);
+    await requestGalleryPermission();
+
+    try {
+      const res = await launchImageLibrary({
+        mediaType: 'video',
+        selectionLimit: 1,
+      });
+
+      if (res.didCancel) return;
+      if (res.errorCode) {
+        Alert.alert('Video Error', res.errorMessage || res.errorCode);
+        return;
+      }
+
+      if (res.assets && res.assets.length > 0) {
+        const asset = res.assets[0];
+        if (asset.uri) {
+          setSelectedMedia({
+            mediaType: 'video',
+            uri: asset.uri,
+            type: asset.type || 'video/mp4',
+            fileName: asset.fileName || `video_${Date.now()}.mp4`,
+            fileSize: asset.fileSize,
+            duration: asset.duration,
+          });
+        }
+      }
+    } catch (err: any) {
+      console.warn('[Video] Error:', err);
+      Alert.alert('Error', err?.message || 'Failed to open video picker');
+    }
+  };
+
+  const handlePickDocument = async () => {
+    setAttachmentModalVisible(false);
+    try {
+      const res = await DocumentPicker.pickSingle({
+        type: [
+          docTypes.pdf,
+          docTypes.doc,
+          docTypes.docx,
+          docTypes.allFiles,
+          'application/pdf',
+          'application/msword',
+          'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        ],
+        copyTo: 'cachesDirectory',
+      });
+
+      if (res) {
+        const fileUri = res.fileCopyUri || res.uri;
+        setSelectedMedia({
+          mediaType: 'document',
+          uri: fileUri,
+          type: res.type || 'application/pdf',
+          fileName: res.name || `document_${Date.now()}`,
+          fileSize: res.size || undefined,
+        });
+      }
+    } catch (err: any) {
+      if (DocumentPicker.isCancel(err)) {
+        return;
+      }
+      console.warn('[Document] Error:', err);
+      Alert.alert('Error', err?.message || 'Failed to pick document');
+    }
+  };
+
+  const handleAttachmentMenu = () => {
+    Keyboard.dismiss();
+    setAttachmentModalVisible(true);
+  };
+
+  const handlePickImage = handleAttachmentMenu;
+
   const handleSend = async (textToSend?: string) => {
     const text = (textToSend || inputMessage).trim();
-    if (!text) return;
+    if (!text && !selectedMedia) return;
+    const mediaToSend = selectedMedia;
     setInputMessage('');
-    await sendMessage(conversationId, text);
+    setSelectedMedia(null);
+    await sendMessage(conversationId, text, mediaToSend || undefined);
     flatListRef.current?.scrollToEnd({ animated: true });
+    fetchConversations().catch(() => {});
   };
 
   const handleOpenCreateTask = (messageText: string, timestamp?: string, eventType?: string) => {
@@ -561,6 +824,30 @@ export const ChatDetailScreen: React.FC = () => {
     return { senderName: null, contentText: text };
   };
 
+  const handleOpenDirectMedia = async (rawUri: string | null, filename: string, isVideo: boolean) => {
+    if (!rawUri) {
+      Alert.alert(
+        isVideo ? 'Video' : 'Document',
+        `File: ${filename}\nMedia was received via WhatsApp.`
+      );
+      return;
+    }
+
+    const fullUrl = resolveMediaUrl(rawUri) || rawUri;
+
+    try {
+      await Linking.openURL(fullUrl);
+    } catch (err: any) {
+      console.warn('[OpenMedia Error]', err);
+      Alert.alert(
+        isVideo ? 'Play Video' : 'Open Document',
+        `File: ${filename}\nCould not open with system player.`
+      );
+    }
+  };
+
+  const handleOpenMedia = handleOpenDirectMedia;
+
   const renderMessageBubble = (item: ChatMessage) => {
     const isStaff = item.sender === 'staff';
     const rawText = item.text || (item as any).message || '';
@@ -661,9 +948,70 @@ export const ChatDetailScreen: React.FC = () => {
       );
     }
 
-    const isImage = item.message_type === 'image' || !!item.metadata?.isImage || !!item.metadata?.mediaUrl || rawText.startsWith('data:image') || rawText.startsWith('/9j/');
-    const imageUri = item.metadata?.mediaUrl || (rawText.startsWith('data:image') ? rawText : (rawText.startsWith('/9j/') ? `data:image/jpeg;base64,${rawText}` : null));
-    const captionText = item.metadata?.caption || (!rawText.startsWith('data:image') && !rawText.startsWith('/9j/') && rawText !== '📷 Photo' && rawText !== 'Images' && rawText !== 'Image' && rawText !== '🖼️ Image' ? contentText : '');
+    let parsedMeta: any = item.metadata;
+    if (typeof parsedMeta === 'string') {
+      try {
+        parsedMeta = JSON.parse(parsedMeta);
+      } catch (_) {
+        parsedMeta = null;
+      }
+    }
+    const rawMediaUrl = parsedMeta?.mediaUrl || null;
+    const metaMediaUrl = resolveMediaUrl(rawMediaUrl);
+    const mimeType = String(parsedMeta?.mimetype || '').toLowerCase();
+    const fileName = String(parsedMeta?.filename || '').toLowerCase();
+
+    // Accurate media classification — prioritize Video and Document first to prevent solid box fallback
+    const isVideo =
+      item.message_type === 'video' ||
+      Boolean(parsedMeta?.isVideo) ||
+      mimeType.startsWith('video/') ||
+      Boolean(fileName.match(/\.(mp4|mov|3gp|mkv|avi|webm)$/i)) ||
+      (metaMediaUrl ? Boolean(metaMediaUrl.match(/\.(mp4|mov|3gp|mkv|avi|webm)($|\?)/i)) : false) ||
+      rawText === '🎥 Video' ||
+      rawText === 'Video';
+
+    const isDocument =
+      !isVideo &&
+      (item.message_type === 'document' ||
+        Boolean(parsedMeta?.isDocument) ||
+        mimeType.includes('pdf') ||
+        mimeType.includes('word') ||
+        mimeType.includes('officedocument') ||
+        mimeType.includes('msword') ||
+        mimeType.includes('document') ||
+        mimeType.includes('application/zip') ||
+        mimeType.includes('application/octet-stream') ||
+        Boolean(fileName.match(/\.(pdf|doc|docx|xls|xlsx|ppt|pptx|txt|zip|apk)$/i)) ||
+        (metaMediaUrl ? Boolean(metaMediaUrl.match(/\.(pdf|doc|docx|xls|xlsx|ppt|pptx|txt|zip|apk)($|\?)/i)) : false) ||
+        rawText === '📄 Document' ||
+        rawText.startsWith('📄 ') ||
+        rawText === 'Document');
+
+    const isImage =
+      !isVideo &&
+      !isDocument &&
+      (item.message_type === 'image' ||
+        Boolean(parsedMeta?.isImage) ||
+        mimeType.startsWith('image/') ||
+        Boolean(fileName.match(/\.(jpg|jpeg|png|webp|gif)$/i)) ||
+        rawText.startsWith('data:image') ||
+        rawText.startsWith('/9j/') ||
+        (metaMediaUrl ? Boolean(metaMediaUrl.match(/\.(jpg|jpeg|png|webp|gif)($|\?)/i)) : false) ||
+        rawText === '📷 Photo' ||
+        rawText === 'Photo' ||
+        rawText === 'Images' ||
+        rawText === 'Image');
+
+    const imageUri = isImage ? (metaMediaUrl || (rawText.startsWith('data:image') ? rawText : (rawText.startsWith('/9j/') ? `data:image/jpeg;base64,${rawText}` : null))) : null;
+    const mediaUri = metaMediaUrl || imageUri;
+    const docFilename = parsedMeta?.filename || (isDocument && rawText && !['📄 Document', 'Document', '📷 Photo', 'Photo'].includes(rawText) ? contentText : (isVideo ? 'Video' : 'Document'));
+    const docFileSize = parsedMeta?.fileSize;
+    const docDuration = parsedMeta?.duration;
+    const docExt = (docFilename.split('.').pop() || (isDocument ? 'DOC' : 'VID')).toUpperCase();
+
+    const isNonCaptionPlaceholder = ['📷 Photo', 'Images', 'Image', '🖼️ Image', '🎥 Video', 'Video', '📄 Document', 'Document'].includes(rawText);
+    const captionText = parsedMeta?.caption || (!rawText.startsWith('data:') && !rawText.startsWith('/9j/') && !isNonCaptionPlaceholder ? contentText : '');
 
     const displayText = getDisplayText(contentText);
 
@@ -678,7 +1026,7 @@ export const ChatDetailScreen: React.FC = () => {
           style={[
             styles.bubbleContainer,
             isStaff ? styles.bubbleStaff : styles.bubbleCustomer,
-            isImage && styles.bubbleImageContainer,
+            (isImage || isVideo || isDocument) && styles.bubbleImageContainer,
           ]}
         >
           {/* Sender indicator on top left side of Create Task */}
@@ -691,7 +1039,7 @@ export const ChatDetailScreen: React.FC = () => {
               {/* One-Tap 📌 Create Task button directly on customer message */}
               <TouchableOpacity
                 style={styles.taskConvertBtn}
-                onPress={() => handleOpenCreateTask(captionText || displayText, item.timestamp, isImage ? 'WhatsApp Image' : 'WhatsApp Chat')}
+                onPress={() => handleOpenCreateTask(captionText || displayText, item.timestamp, isImage ? 'WhatsApp Image' : (isVideo ? 'WhatsApp Video' : (isDocument ? 'WhatsApp Document' : 'WhatsApp Chat')))}
                 activeOpacity={0.7}
               >
                 <Text style={styles.taskConvertBtnText}>📌 Create Task</Text>
@@ -702,11 +1050,16 @@ export const ChatDetailScreen: React.FC = () => {
           {isImage ? (
             <View style={styles.mediaContentBox}>
               {imageUri ? (
-                <Image
-                  source={{ uri: imageUri }}
-                  style={styles.chatImagePreview}
-                  resizeMode="cover"
-                />
+                <TouchableOpacity
+                  activeOpacity={0.88}
+                  onPress={() => setSelectedMediaModal({ visible: true, type: 'image', uri: imageUri, caption: captionText })}
+                >
+                  <Image
+                    source={{ uri: imageUri }}
+                    style={styles.chatImagePreview}
+                    resizeMode="cover"
+                  />
+                </TouchableOpacity>
               ) : (
                 <View style={styles.placeholderImageBox}>
                   <Icon name="image" size={36} color={isStaff ? '#FFFFFF' : COLORS.primary} />
@@ -715,6 +1068,61 @@ export const ChatDetailScreen: React.FC = () => {
                   </Text>
                 </View>
               )}
+              {captionText ? (
+                <Text style={[styles.bubbleText, styles.mediaCaptionText, isStaff ? styles.textWhite : styles.textDark]}>
+                  {captionText}
+                </Text>
+              ) : null}
+            </View>
+          ) : isVideo ? (
+            <View style={styles.mediaContentBox}>
+              <TouchableOpacity
+                activeOpacity={0.85}
+                style={styles.videoCardContainer}
+                onPress={() => handleOpenDirectMedia(mediaUri, docFilename, true)}
+              >
+                <View style={styles.videoThumbnailBox}>
+                  <View style={styles.videoPlayCircle}>
+                    <Icon name="play" size={24} color="#FFFFFF" />
+                  </View>
+                  <View style={styles.videoMetaOverlay}>
+                    <Text style={styles.videoFilenameText} numberOfLines={1}>
+                      {docFilename || 'Video'}
+                    </Text>
+                  </View>
+                  {docDuration ? (
+                    <View style={styles.videoDurationBadge}>
+                      <Text style={styles.videoDurationText}>{formatDuration(docDuration)}</Text>
+                    </View>
+                  ) : null}
+                </View>
+              </TouchableOpacity>
+              {captionText ? (
+                <Text style={[styles.bubbleText, styles.mediaCaptionText, isStaff ? styles.textWhite : styles.textDark]}>
+                  {captionText}
+                </Text>
+              ) : null}
+            </View>
+          ) : isDocument ? (
+            <View style={styles.docContentBox}>
+              <TouchableOpacity
+                activeOpacity={0.85}
+                style={[styles.docCard, isStaff ? styles.docCardStaff : styles.docCardCustomer]}
+                onPress={() => handleOpenDirectMedia(mediaUri, docFilename, false)}
+              >
+                <View style={[styles.docIconWrapper, docExt === 'PDF' ? styles.docIconPdf : styles.docIconWord]}>
+                  <Icon name="document" size={22} color="#FFFFFF" strokeWidth={2} />
+                </View>
+                <View style={styles.docDetailsBox}>
+                  <Text style={[styles.docTitle, isStaff ? styles.textWhite : styles.textDark]} numberOfLines={2}>
+                    {docFilename}
+                  </Text>
+                  <Text style={[styles.docSub, isStaff ? styles.timeStaff : styles.timeCustomer]}>
+                    {formatFileSize(docFileSize) ? `${formatFileSize(docFileSize)} • ` : ''}{docExt}
+                  </Text>
+                </View>
+                
+              </TouchableOpacity>
               {captionText ? (
                 <Text style={[styles.bubbleText, styles.mediaCaptionText, isStaff ? styles.textWhite : styles.textDark]}>
                   {captionText}
@@ -734,9 +1142,21 @@ export const ChatDetailScreen: React.FC = () => {
             {isStaff ? (
               <View style={styles.checkmarkIcon}>
                 <Icon
-                  name="check-double"
+                  name={
+                    item.status === 'sending' || item.status === 'pending'
+                      ? 'clock-outline'
+                      : item.status === 'failed'
+                      ? 'alert-circle-outline'
+                      : 'check-double'
+                  }
                   size={14}
-                  color={item.status === 'delivered' ? COLORS.accentLime : 'rgba(255,255,255,0.7)'}
+                  color={
+                    item.status === 'failed'
+                      ? '#FF5252'
+                      : item.status === 'delivered'
+                      ? COLORS.accentLime
+                      : 'rgba(255,255,255,0.7)'
+                  }
                 />
               </View>
             ) : null}
@@ -771,9 +1191,12 @@ export const ChatDetailScreen: React.FC = () => {
           <Text style={styles.headerCustomerName} numberOfLines={1}>
             {customerName || activeConversation?.customer_name || 'Customer'}
           </Text>
-          <Text style={styles.headerCustomerPhone}>
-            {activeConversation?.phone_number || 'Live WhatsApp'}
-          </Text>
+          <View style={styles.headerSubtitleRow}>
+            <View style={styles.liveDot} />
+            <Text style={styles.headerCustomerPhone} numberOfLines={1}>
+              {activeConversation?.phone_number || 'Live WhatsApp'} 
+            </Text>
+          </View>
         </View>
       </View>
 
@@ -815,7 +1238,6 @@ export const ChatDetailScreen: React.FC = () => {
           onContentSizeChange={() => {
             if (!isInitialScrollDone.current && groupedMessages.length > 0) {
               flatListRef.current?.scrollToEnd({ animated: false });
-              isInitialScrollDone.current = true;
             }
           }}
           onLayout={() => {
@@ -823,9 +1245,22 @@ export const ChatDetailScreen: React.FC = () => {
               flatListRef.current?.scrollToEnd({ animated: false });
             }
           }}
+          onScrollBeginDrag={() => {
+            isUserDragging.current = true;
+          }}
+          onScrollEndDrag={() => {
+            isUserDragging.current = false;
+          }}
           onScroll={(event) => {
             const offsetY = event.nativeEvent.contentOffset.y;
-            if (offsetY <= 40 && hasMoreMessages && !isLoadingOlder && !isInitialLoading && isInitialScrollDone.current) {
+            if (
+              isUserDragging.current &&
+              offsetY <= 10 &&
+              hasMoreMessages &&
+              !isLoadingOlder &&
+              !isInitialLoading &&
+              isInitialScrollDone.current
+            ) {
               handleLoadOlder();
             }
           }}
@@ -865,6 +1300,49 @@ export const ChatDetailScreen: React.FC = () => {
         />
       )}
 
+      {/* Selected Media Preview */}
+      {selectedMedia && (
+        <View style={styles.selectedImagePreviewContainer}>
+          <View style={styles.selectedImageThumbWrapper}>
+            {selectedMedia.mediaType === 'image' && selectedMedia.uri ? (
+              <Image source={{ uri: selectedMedia.uri }} style={styles.selectedImageThumb} resizeMode="cover" />
+            ) : selectedMedia.mediaType === 'video' ? (
+              <View style={[styles.selectedImageThumb, styles.selectedVideoThumb]}>
+                <Icon name="video" size={20} color="#FFFFFF" />
+              </View>
+            ) : (
+              <View style={[styles.selectedImageThumb, styles.selectedDocThumb]}>
+                <Icon name="document" size={20} color="#FFFFFF" />
+              </View>
+            )}
+            <TouchableOpacity
+              style={styles.selectedImageRemoveBtn}
+              onPress={() => setSelectedMedia(null)}
+              activeOpacity={0.7}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            >
+              <Icon name="x" size={12} color={COLORS.bgWhite} strokeWidth={3} />
+            </TouchableOpacity>
+          </View>
+          <View style={styles.selectedImageInfo}>
+            <Text style={styles.selectedImageTitle} numberOfLines={1}>
+              {selectedMedia.fileName || (selectedMedia.mediaType === 'video' ? 'Video selected' : (selectedMedia.mediaType === 'document' ? 'Document selected' : 'Photo selected'))}
+            </Text>
+            <Text style={styles.selectedImageSub}>
+              {selectedMedia.fileSize ? `${formatFileSize(selectedMedia.fileSize)} • ` : ''}
+              {selectedMedia.duration ? `${formatDuration(selectedMedia.duration)} • ` : ''}
+              Ready to send
+            </Text>
+          </View>
+          <TouchableOpacity
+            onPress={() => setSelectedMedia(null)}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          >
+            <Text style={styles.selectedImageCancelText}>Remove</Text>
+          </TouchableOpacity>
+        </View>
+      )}
+
       {/* Bottom Input Box */}
       <View
         style={[
@@ -876,9 +1354,27 @@ export const ChatDetailScreen: React.FC = () => {
           },
         ]}
       >
+        {/* Attachment Paperclip Button */}
+        <TouchableOpacity
+          style={styles.attachBtn}
+          onPress={handleAttachmentMenu}
+          activeOpacity={0.7}
+          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+        >
+          <Icon name="paperclip" size={20} color={COLORS.primaryNavy} strokeWidth={2.2} />
+        </TouchableOpacity>
+
         <TextInput
           style={styles.textInput}
-          placeholder="Type Here..."
+          placeholder={
+            selectedMedia
+              ? (selectedMedia.mediaType === 'video'
+                ? 'Add a video caption...'
+                : selectedMedia.mediaType === 'document'
+                ? 'Add a message with document...'
+                : 'Add a caption...')
+              : 'Type Here...'
+          }
           placeholderTextColor={COLORS.textSubtle}
           value={inputMessage}
           onChangeText={setInputMessage}
@@ -886,9 +1382,12 @@ export const ChatDetailScreen: React.FC = () => {
           maxLength={1000}
         />
         <TouchableOpacity
-          style={[styles.sendButton, (!inputMessage.trim() || isSending) && styles.sendButtonDisabled]}
+          style={[
+            styles.sendButton,
+            ((!inputMessage.trim() && !selectedMedia) || isSending) && styles.sendButtonDisabled,
+          ]}
           onPress={() => handleSend()}
-          disabled={!inputMessage.trim() || isSending}
+          disabled={(!inputMessage.trim() && !selectedMedia) || isSending}
           activeOpacity={0.8}
         >
           {isSending ? (
@@ -898,6 +1397,191 @@ export const ChatDetailScreen: React.FC = () => {
           )}
         </TouchableOpacity>
       </View>
+
+      {/* WhatsApp-Style Attachment Bottom Sheet Modal */}
+      <Modal
+        visible={attachmentModalVisible}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={() => setAttachmentModalVisible(false)}
+      >
+        <TouchableOpacity
+          style={styles.attachmentModalOverlay}
+          activeOpacity={1}
+          onPress={() => setAttachmentModalVisible(false)}
+        >
+          <View style={styles.attachmentSheet}>
+            <View style={styles.attachmentHandleBar} />
+
+            {/* Header: Title on Left, Cross Close Icon (✕) on Right */}
+            <View style={styles.attachmentHeaderRow}>
+              <View style={styles.attachmentTitleContainer}>
+                <Text style={styles.attachmentTitle}>Attach Files</Text>
+                <Text style={styles.attachmentSubTitle}>Choose an option to share</Text>
+              </View>
+              <TouchableOpacity
+                style={styles.attachmentCloseBtn}
+                onPress={() => setAttachmentModalVisible(false)}
+                activeOpacity={0.7}
+                hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+              >
+                <Icon name="x" size={18} color={COLORS.textDark} strokeWidth={2.5} />
+              </TouchableOpacity>
+            </View>
+
+            {/* 4-Option Grid */}
+            <View style={styles.attachmentGrid}>
+              {/* Document Option (PDF, Word) */}
+              <TouchableOpacity
+                style={styles.attachmentOption}
+                activeOpacity={0.75}
+                onPress={handlePickDocument}
+              >
+                <View style={[styles.attachmentIconCircle, { backgroundColor: '#7C3AED' }]}>
+                  <Icon name="document" size={26} color="#FFFFFF" strokeWidth={2.2} />
+                </View>
+                <Text style={styles.attachmentLabel}>Document</Text>
+                <Text style={styles.attachmentSubLabel}>PDF, Word</Text>
+              </TouchableOpacity>
+
+              {/* Camera Option */}
+              <TouchableOpacity
+                style={styles.attachmentOption}
+                activeOpacity={0.75}
+                onPress={handlePickCamera}
+              >
+                <View style={[styles.attachmentIconCircle, { backgroundColor: '#EC4899' }]}>
+                  <Icon name="camera" size={26} color="#FFFFFF" strokeWidth={2.2} />
+                </View>
+                <Text style={styles.attachmentLabel}>Camera</Text>
+                <Text style={styles.attachmentSubLabel}>Take photo</Text>
+              </TouchableOpacity>
+
+              {/* Gallery Option */}
+              <TouchableOpacity
+                style={styles.attachmentOption}
+                activeOpacity={0.75}
+                onPress={handlePickGallery}
+              >
+                <View style={[styles.attachmentIconCircle, { backgroundColor: '#3B82F6' }]}>
+                  <Icon name="image" size={26} color="#FFFFFF" strokeWidth={2.2} />
+                </View>
+                <Text style={styles.attachmentLabel}>Gallery</Text>
+                <Text style={styles.attachmentSubLabel}>Photos</Text>
+              </TouchableOpacity>
+
+              {/* Video Option */}
+              <TouchableOpacity
+                style={styles.attachmentOption}
+                activeOpacity={0.75}
+                onPress={handlePickVideo}
+              >
+                <View style={[styles.attachmentIconCircle, { backgroundColor: '#06B6D4' }]}>
+                  <Icon name="video" size={26} color="#FFFFFF" strokeWidth={2.2} />
+                </View>
+                <Text style={styles.attachmentLabel}>Video</Text>
+                <Text style={styles.attachmentSubLabel}>Record / Clip</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </TouchableOpacity>
+      </Modal>
+
+      {/* Fullscreen Media Preview Modal (Image / Video / PDF / Word) */}
+      <Modal
+        visible={selectedMediaModal.visible}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={() => setSelectedMediaModal({ visible: false, type: 'image', uri: '', caption: '' })}
+      >
+        <View style={styles.fullscreenModalContainer}>
+          <TouchableOpacity
+            style={styles.fullscreenCloseBtn}
+            onPress={() => setSelectedMediaModal({ visible: false, type: 'image', uri: '', caption: '' })}
+            activeOpacity={0.8}
+            hitSlop={{ top: 15, bottom: 15, left: 15, right: 15 }}
+          >
+            <Icon name="x" size={24} color="#FFFFFF" strokeWidth={2.5} />
+          </TouchableOpacity>
+
+          {selectedMediaModal.type === 'image' && selectedMediaModal.uri ? (
+            <Image
+              source={{ uri: resolveMediaUrl(selectedMediaModal.uri) || selectedMediaModal.uri }}
+              style={styles.fullscreenImage}
+              resizeMode="contain"
+            />
+          ) : selectedMediaModal.type === 'video' ? (
+            <View style={styles.fullscreenVideoCard}>
+              <View style={styles.fullscreenVideoIconCircle}>
+                <Icon name="video" size={54} color="#FFFFFF" strokeWidth={2.2} />
+              </View>
+              <Text style={styles.fullscreenMediaTitle} numberOfLines={2}>
+                {selectedMediaModal.filename || 'Video'}
+              </Text>
+              {selectedMediaModal.duration ? (
+                <Text style={styles.fullscreenMediaSub}>
+                  Duration: {formatDuration(selectedMediaModal.duration)}
+                </Text>
+              ) : null}
+              {selectedMediaModal.uri ? (
+                <TouchableOpacity
+                  style={styles.fullscreenOpenBtn}
+                  activeOpacity={0.85}
+                  onPress={() => {
+                    const resolved = resolveMediaUrl(selectedMediaModal.uri) || selectedMediaModal.uri;
+                    Linking.openURL(resolved).catch(() => {});
+                  }}
+                >
+                  <Icon name="play" size={20} color="#FFFFFF" strokeWidth={2.5} />
+                  <Text style={styles.fullscreenOpenBtnText}>Play Video</Text>
+                </TouchableOpacity>
+              ) : null}
+            </View>
+          ) : selectedMediaModal.type === 'document' ? (
+            <View style={styles.fullscreenDocCard}>
+              <View
+                style={[
+                  styles.fullscreenDocIconCircle,
+                  selectedMediaModal.ext === 'PDF' ? { backgroundColor: '#E11D48' } : { backgroundColor: '#2563EB' },
+                ]}
+              >
+                <Icon name="document" size={48} color="#FFFFFF" strokeWidth={2.2} />
+                <Text style={styles.fullscreenDocExtText}>{selectedMediaModal.ext || 'DOC'}</Text>
+              </View>
+              <Text style={styles.fullscreenMediaTitle} numberOfLines={2}>
+                {selectedMediaModal.filename || 'Document'}
+              </Text>
+              {selectedMediaModal.filesize ? (
+                <Text style={styles.fullscreenMediaSub}>
+                  Size: {formatFileSize(selectedMediaModal.filesize)}
+                </Text>
+              ) : null}
+              {selectedMediaModal.uri ? (
+                <TouchableOpacity
+                  style={[
+                    styles.fullscreenOpenBtn,
+                    selectedMediaModal.ext === 'PDF' ? { backgroundColor: '#E11D48' } : { backgroundColor: '#2563EB' },
+                  ]}
+                  activeOpacity={0.85}
+                  onPress={() => {
+                    const resolved = resolveMediaUrl(selectedMediaModal.uri) || selectedMediaModal.uri;
+                    Linking.openURL(resolved).catch(() => {});
+                  }}
+                >
+                  <Icon name="external-link" size={20} color="#FFFFFF" strokeWidth={2.5} />
+                  <Text style={styles.fullscreenOpenBtnText}>Open Document</Text>
+                </TouchableOpacity>
+              ) : null}
+            </View>
+          ) : null}
+
+          {selectedMediaModal.caption ? (
+            <View style={styles.fullscreenCaptionContainer}>
+              <Text style={styles.fullscreenCaptionText}>{selectedMediaModal.caption}</Text>
+            </View>
+          ) : null}
+        </View>
+      </Modal>
 
       {/* Create Task Modal */}
       <Modal
@@ -1226,10 +1910,21 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '700',
   },
+  headerSubtitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 2,
+    gap: 5,
+  },
+  liveDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 3.5,
+    backgroundColor: '#22C55E',
+  },
   headerCustomerPhone: {
-    color: 'rgba(255,255,255,0.7)',
+    color: 'rgba(255,255,255,0.85)',
     fontSize: 12,
-    marginTop: 1,
   },
   verifiedDot: {
     width: 8,
@@ -1338,10 +2033,10 @@ const styles = StyleSheet.create({
     marginBottom: 4,
   },
   chatImagePreview: {
-    width: 220,
-    height: 180,
+    width: 240,
+    height: 190,
     borderRadius: RADIUS.md,
-    backgroundColor: '#E2E8F0',
+    backgroundColor: 'rgba(0,0,0,0.04)',
   },
   placeholderImageBox: {
     width: 200,
@@ -1351,6 +2046,249 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     gap: 6,
+  },
+  videoCardContainer: {
+    width: 230,
+    height: 140,
+    borderRadius: RADIUS.md,
+    overflow: 'hidden',
+    backgroundColor: '#0F172A',
+  },
+  videoThumbnailBox: {
+    width: '100%',
+    height: '100%',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#1E293B',
+    position: 'relative',
+  },
+  videoPlayCircle: {
+    width: 52,
+    height: 52,
+    borderRadius: 26,
+    backgroundColor: 'rgba(0,0,0,0.65)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 2,
+    borderColor: 'rgba(255,255,255,0.85)',
+  },
+  videoDurationBadge: {
+    position: 'absolute',
+    bottom: 8,
+    right: 8,
+    backgroundColor: 'rgba(0,0,0,0.75)',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+  },
+  videoDurationText: {
+    color: '#FFFFFF',
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  videoMetaOverlay: {
+    position: 'absolute',
+    top: 8,
+    left: 8,
+    right: 8,
+    backgroundColor: 'rgba(0,0,0,0.55)',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 4,
+  },
+  videoFilenameText: {
+    color: '#FFFFFF',
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  docContentBox: {
+    minWidth: 220,
+    maxWidth: 260,
+    marginBottom: 4,
+  },
+  docCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 10,
+    borderRadius: RADIUS.md,
+    gap: 10,
+  },
+  docCardStaff: {
+    backgroundColor: 'rgba(255,255,255,0.18)',
+  },
+  docCardCustomer: {
+    backgroundColor: '#F1F5F9',
+  },
+  docIconWrapper: {
+    width: 42,
+    height: 46,
+    borderRadius: RADIUS.sm,
+    alignItems: 'center',
+    justifyContent: 'center',
+    position: 'relative',
+    overflow: 'hidden',
+  },
+  docIconPdf: {
+    backgroundColor: '#E11D48',
+  },
+  docIconWord: {
+    backgroundColor: '#2563EB',
+  },
+  docExtBadge: {
+    position: 'absolute',
+    bottom: 2,
+    fontSize: 8,
+    fontWeight: '800',
+    color: '#FFFFFF',
+  },
+  docDetailsBox: {
+    flex: 1,
+  },
+  docTitle: {
+    fontSize: 13,
+    fontWeight: '600',
+    lineHeight: 17,
+  },
+  docSub: {
+    fontSize: 11,
+    marginTop: 2,
+  },
+  docActionIcon: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(0,0,0,0.06)',
+  },
+  selectedVideoThumb: {
+    backgroundColor: '#1E293B',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  selectedDocThumb: {
+    backgroundColor: '#E11D48',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  fullscreenModalContainer: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.95)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  fullscreenCloseBtn: {
+    position: 'absolute',
+    top: Platform.OS === 'ios' ? 54 : 32,
+    right: 20,
+    zIndex: 999,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: 'rgba(255,255,255,0.25)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  fullscreenImage: {
+    width: '94%',
+    height: '75%',
+  },
+  fullscreenCaptionContainer: {
+    position: 'absolute',
+    bottom: 40,
+    left: 20,
+    right: 20,
+    backgroundColor: 'rgba(0,0,0,0.65)',
+    padding: 12,
+    borderRadius: RADIUS.md,
+  },
+  fullscreenCaptionText: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    textAlign: 'center',
+  },
+  fullscreenVideoCard: {
+    width: '85%',
+    backgroundColor: '#0F172A',
+    borderRadius: RADIUS.xl,
+    padding: 24,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.15)',
+  },
+  fullscreenVideoIconCircle: {
+    width: 96,
+    height: 96,
+    borderRadius: 48,
+    backgroundColor: '#06B6D4',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 16,
+    shadowColor: '#06B6D4',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.4,
+    shadowRadius: 10,
+    elevation: 8,
+  },
+  fullscreenDocCard: {
+    width: '85%',
+    backgroundColor: '#0F172A',
+    borderRadius: RADIUS.xl,
+    padding: 24,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.15)',
+  },
+  fullscreenDocIconCircle: {
+    width: 96,
+    height: 96,
+    borderRadius: 48,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 16,
+    position: 'relative',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.4,
+    shadowRadius: 10,
+    elevation: 8,
+  },
+  fullscreenDocExtText: {
+    position: 'absolute',
+    bottom: 8,
+    fontSize: 10,
+    fontWeight: '900',
+    color: '#FFFFFF',
+    letterSpacing: 0.5,
+  },
+  fullscreenMediaTitle: {
+    color: '#FFFFFF',
+    fontSize: 16,
+    fontWeight: '700',
+    textAlign: 'center',
+    marginBottom: 6,
+  },
+  fullscreenMediaSub: {
+    color: '#94A3B8',
+    fontSize: 13,
+    marginBottom: 20,
+    textAlign: 'center',
+  },
+  fullscreenOpenBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#0284C7',
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+    borderRadius: RADIUS.lg,
+    gap: 8,
+    width: '100%',
+  },
+  fullscreenOpenBtnText: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontWeight: '700',
   },
   placeholderImageLabel: {
     fontSize: 12,
@@ -1405,6 +2343,66 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     paddingHorizontal: 32,
   },
+  selectedImagePreviewContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#F1F5F9',
+    paddingHorizontal: SPACING.md,
+    paddingVertical: 8,
+    borderTopWidth: 1,
+    borderTopColor: COLORS.borderColor,
+    gap: 12,
+  },
+  selectedImageThumbWrapper: {
+    width: 48,
+    height: 48,
+    borderRadius: RADIUS.sm,
+    overflow: 'hidden',
+    position: 'relative',
+    borderWidth: 1.5,
+    borderColor: COLORS.primaryNavy,
+  },
+  selectedImageThumb: {
+    width: '100%',
+    height: '100%',
+  },
+  selectedImageRemoveBtn: {
+    position: 'absolute',
+    top: 2,
+    right: 2,
+    backgroundColor: 'rgba(0, 0, 0, 0.7)',
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  selectedImageInfo: {
+    flex: 1,
+  },
+  selectedImageTitle: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: COLORS.primaryNavy,
+  },
+  selectedImageSub: {
+    fontSize: 11,
+    color: COLORS.textSubtle,
+    marginTop: 1,
+  },
+  selectedImageCancelText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#EF4444',
+  },
+  attachBtn: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: 'rgba(26, 59, 113, 0.08)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   inputContainer: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1413,7 +2411,7 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.bgWhite,
     borderTopWidth: 1,
     borderTopColor: COLORS.borderColor,
-    gap: 10,
+    gap: 8,
   },
   textInput: {
     flex: 1,
@@ -1861,5 +2859,98 @@ const styles = StyleSheet.create({
   callSubtitleText: {
     fontSize: 11,
     marginTop: 1,
+  },
+  attachmentModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.45)',
+    justifyContent: 'flex-end',
+  },
+  attachmentSheet: {
+    backgroundColor: '#FFFFFF',
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    paddingHorizontal: 20,
+    paddingTop: 12,
+    paddingBottom: Platform.OS === 'ios' ? 36 : 24,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: -4 },
+    shadowOpacity: 0.15,
+    shadowRadius: 12,
+    elevation: 24,
+  },
+  attachmentHandleBar: {
+    width: 38,
+    height: 4,
+    backgroundColor: '#E2E8F0',
+    borderRadius: 2,
+    alignSelf: 'center',
+    marginBottom: 12,
+  },
+  attachmentHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 20,
+    paddingHorizontal: 4,
+  },
+  attachmentTitleContainer: {
+    flex: 1,
+  },
+  attachmentTitle: {
+    fontSize: 17,
+    fontWeight: '700',
+    color: COLORS.primaryNavy,
+    letterSpacing: -0.2,
+  },
+  attachmentSubTitle: {
+    fontSize: 12,
+    color: COLORS.textMuted,
+    marginTop: 2,
+  },
+  attachmentCloseBtn: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: '#F1F5F9',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  attachmentGrid: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 6,
+    marginBottom: 10,
+  },
+  attachmentOption: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: 72,
+  },
+  attachmentIconCircle: {
+    width: 58,
+    height: 58,
+    borderRadius: 29,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 8,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.18,
+    shadowRadius: 6,
+    elevation: 5,
+  },
+  attachmentLabel: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: COLORS.textDark,
+    textAlign: 'center',
+  },
+  attachmentSubLabel: {
+    fontSize: 10,
+    fontWeight: '400',
+    color: COLORS.textMuted,
+    textAlign: 'center',
+    marginTop: 2,
   },
 });

@@ -34,6 +34,7 @@ const Conversation = {
         c.is_pinned,
         COALESCE(NULLIF(cu.name, ''), cu.phone_number, 'Customer') as customer_name,
         COALESCE(cu.phone_number, '') as phone_number,
+        cu.whatsapp_jid as whatsapp_jid,
         cu.profile_pic_url as avatar,
         COALESCE(
           c.last_message_preview,
@@ -132,6 +133,7 @@ const Conversation = {
         c.is_pinned,
         COALESCE(NULLIF(cu.name, ''), cu.phone_number, 'Customer') as customer_name,
         COALESCE(cu.phone_number, '') as phone_number,
+        cu.whatsapp_jid as whatsapp_jid,
         cu.profile_pic_url as avatar,
         COALESCE(
           (

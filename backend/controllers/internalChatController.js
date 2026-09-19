@@ -1,3 +1,4 @@
+const path = require('path');
 const { InternalMessage, User } = require('../models');
 const { broadcastInternalMessage } = require('../services/socketService');
 
@@ -97,7 +98,21 @@ const internalChatController = {
         });
       }
 
-      const messageType = media_urls && media_urls.length > 0 ? 'image' : 'text';
+      let messageType = 'text';
+      if (files && files.length > 0) {
+        const firstFile = files[0];
+        const mime = (firstFile.mimetype || '').toLowerCase();
+        const ext = path.extname(firstFile.originalname || '').toLowerCase();
+        if (mime.startsWith('image/') || ext.match(/\.(jpg|jpeg|png|webp|gif)$/i)) {
+          messageType = 'image';
+        } else if (mime.startsWith('video/') || ext.match(/\.(mp4|mov|3gp|mkv)$/i)) {
+          messageType = 'video';
+        } else if (mime.includes('pdf') || mime.includes('word') || mime.includes('officedocument') || mime.includes('msword') || ext.match(/\.(pdf|doc|docx)$/i)) {
+          messageType = 'document';
+        } else {
+          messageType = 'media';
+        }
+      }
 
       const newMsg = await InternalMessage.create({
         sender_id: senderId,

@@ -95,11 +95,7 @@ export const ChatSelectScreen: React.FC = () => {
               <Text style={styles.cardTitle}>1. WhatsApp Personal Chat</Text>
             </View>
             <Text style={styles.cardSubtitle}>
-              {personalAccounts.length === 0
-                ? 'No Personal WhatsApp linked. Tap to link your number.'
-                : personalAccounts.length === 1
-                ? `${personalAccounts[0].whatsapp_name || personalAccounts[0].account_name} (${personalAccounts[0].phone_number ? '+' + personalAccounts[0].phone_number.replace('+', '') : 'Linked'})`
-                : `${personalAccounts.length} Personal WhatsApp accounts (${activePersonalOnline} Online)`}
+              Connect with your personal WhatsApp and manage your chats easily
             </Text>
 
             <View style={styles.badgeRow}>
@@ -113,7 +109,7 @@ export const ChatSelectScreen: React.FC = () => {
                 {personalAccounts.length === 0
                   ? 'Tap to Link Device'
                   : activePersonalOnline > 0
-                  ? `${activePersonalOnline} Active Session${activePersonalOnline > 1 ? 's' : ''}`
+                  ? `Member ${activePersonalOnline} active in session${activePersonalOnline > 1 ? 's' : ''}`
                   : 'Disconnected'}
               </Text>
             </View>
@@ -140,13 +136,9 @@ export const ChatSelectScreen: React.FC = () => {
             <View style={styles.titleRow}>
               <Text style={styles.cardTitle}>2. WhatsApp Team Chat</Text>
             </View>
-            <Text style={styles.cardSubtitle}>
-              {teamAccounts.length === 0
-                ? 'No Team WhatsApp linked. Tap to manage team numbers.'
-                : teamAccounts.length === 1
-                ? `${teamAccounts[0].whatsapp_name || teamAccounts[0].account_name} (${teamAccounts[0].phone_number ? '+' + teamAccounts[0].phone_number.replace('+', '') : 'Shared Desk'})`
-                : `${teamAccounts.length} Team WhatsApp accounts (${activeTeamOnline} Online)`}
-            </Text>
+             <Text style={styles.cardSubtitle}>
+              Connect with your team WhatsApp and manage your chats easily
+            </Text> 
 
             <View style={styles.badgeRow}>
               <View
@@ -159,7 +151,7 @@ export const ChatSelectScreen: React.FC = () => {
                 {teamAccounts.length === 0
                   ? 'No Team Account'
                   : activeTeamOnline > 0
-                  ? `${activeTeamOnline} Team Session${activeTeamOnline > 1 ? 's' : ''} Online`
+                  ? `Team member ${activeTeamOnline} active in session${activeTeamOnline > 1 ? 's' : ''}`
                   : 'Disconnected'}
               </Text>
             </View>
@@ -188,13 +180,13 @@ export const ChatSelectScreen: React.FC = () => {
             </View>
 
             <Text style={styles.cardSubtitle}>
-              Internal team messaging, private chats & staff collaboration.
+              Internal team messaging, private chats & team collaboration.
             </Text>
 
             <View style={styles.badgeRow}>
               <View style={[styles.statusIndicator, { backgroundColor: '#8B5CF6' }]} />
               <Text style={[styles.statusText, { color: '#8B5CF6' }]}>
-                Internal Team Messaging
+                Internal team messaging
               </Text>
             </View>
           </View>

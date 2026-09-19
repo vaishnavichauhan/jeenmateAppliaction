@@ -241,7 +241,7 @@ export const LinkScreen: React.FC = () => {
   const handleDisconnect = (account: WhatsAppAccount) => {
     Alert.alert(
       'Disconnect WhatsApp',
-      `Are you sure you want to disconnect ${account.account_name}? All WhatsApp chats and messages for this session will be cleared from the database, and you can scan a new QR code anytime.`,
+      `Are you sure you want to disconnect your Account`,
       [
         { text: 'Cancel', style: 'cancel' },
         {

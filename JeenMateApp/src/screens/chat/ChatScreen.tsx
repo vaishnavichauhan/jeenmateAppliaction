@@ -80,8 +80,18 @@ export const ChatScreen: React.FC = () => {
   useFocusEffect(
     useCallback(() => {
       let isMounted = true;
+      setIsInitialLoad(true);
       fetchAccounts()
-        .then(() => fetchConversations(useWhatsAppStore.getState().selectedAccountId || undefined))
+        .then(async () => {
+          const currentAccId = useWhatsAppStore.getState().selectedAccountId || undefined;
+          const selectedAcc = useWhatsAppStore.getState().selectedAccount;
+          if (selectedAcc && (selectedAcc.status === 'online' || selectedAcc.is_connected)) {
+            await syncWhatsAppChats().catch(() => {});
+          } else {
+            await fetchConversations(currentAccId);
+          }
+        })
+        .catch(() => {})
         .finally(() => {
           if (isMounted) {
             setIsInitialLoad(false);
@@ -90,13 +100,18 @@ export const ChatScreen: React.FC = () => {
       return () => {
         isMounted = false;
       };
-    }, [fetchAccounts, fetchConversations])
+    }, [fetchAccounts, fetchConversations, syncWhatsAppChats])
   );
 
   const onRefresh = async () => {
     setRefreshing(true);
     await fetchAccounts();
-    await fetchConversations(selectedAccountId || undefined);
+    const currentAccId = useWhatsAppStore.getState().selectedAccountId || undefined;
+    await fetchConversations(currentAccId);
+    const selectedAcc = useWhatsAppStore.getState().selectedAccount;
+    if (selectedAcc && (selectedAcc.status === 'online' || selectedAcc.is_connected)) {
+      await syncWhatsAppChats().catch(() => {});
+    }
     setVisibleCount(50);
     setRefreshing(false);
   };
@@ -429,7 +444,7 @@ export const ChatScreen: React.FC = () => {
       ) : isInitialLoad ? (
         <View style={styles.loadingContainer}>
           <ActivityIndicator size="large" color={COLORS.primary} />
-          <Text style={styles.loadingText}>Loading conversations...</Text>
+          <Text style={styles.loadingText}>Syncing chats...</Text>
         </View>
       ) : (
         <>
@@ -471,7 +486,7 @@ export const ChatScreen: React.FC = () => {
               <Icon name="search" size={16} color={COLORS.textMuted} />
               <TextInput
                 style={styles.searchInput}
-                placeholder="Search by customer name, phone..."
+                placeholder="Search by name, phone no..."
                 placeholderTextColor={COLORS.textSubtle}
                 value={searchQuery}
                 onChangeText={setSearchQuery}

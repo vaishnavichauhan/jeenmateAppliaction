@@ -26,6 +26,13 @@ async function initDb() {
   try {
     const connection = await pool.getConnection();
 
+    try {
+      await connection.query('SET SESSION sort_buffer_size = 67108864');
+    } catch (_) {}
+    try {
+      await connection.query('SET GLOBAL sort_buffer_size = 67108864');
+    } catch (_) {}
+
     // Create tasks table if not exists
     await connection.execute(`
       CREATE TABLE IF NOT EXISTS tasks (
@@ -91,6 +98,12 @@ async function initDb() {
       await connection.execute("ALTER TABLE messages ADD COLUMN message_type VARCHAR(50) DEFAULT 'text'");
     } catch (e) {}
     try {
+      await connection.execute('ALTER TABLE messages ADD INDEX idx_conv_time (conversation_id, whatsapp_timestamp)');
+    } catch (e) {}
+    try {
+      await connection.execute("ALTER TABLE messages MODIFY COLUMN status ENUM('pending', 'sending', 'sent', 'delivered', 'read', 'failed') DEFAULT 'pending'");
+    } catch (e) {}
+    try {
       await connection.execute('ALTER TABLE conversations ADD COLUMN last_message_preview TEXT NULL');
     } catch (e) {}
 
@@ -102,7 +115,7 @@ async function initDb() {
         receiver_id INT NOT NULL,
         message_text TEXT NULL,
         media_urls TEXT NULL,
-        message_type ENUM('text', 'image', 'media') DEFAULT 'text',
+        message_type VARCHAR(50) DEFAULT 'text',
         is_read TINYINT(1) DEFAULT 0,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         INDEX idx_sender_receiver (sender_id, receiver_id),
@@ -114,7 +127,7 @@ async function initDb() {
       await connection.execute('ALTER TABLE internal_messages ADD COLUMN media_urls TEXT NULL');
     } catch (e) {}
     try {
-      await connection.execute("ALTER TABLE internal_messages ADD COLUMN message_type ENUM('text', 'image', 'media') DEFAULT 'text'");
+      await connection.execute("ALTER TABLE internal_messages MODIFY COLUMN message_type VARCHAR(50) DEFAULT 'text'");
     } catch (e) {}
     try {
       await connection.execute('ALTER TABLE internal_messages MODIFY COLUMN message_text TEXT NULL');

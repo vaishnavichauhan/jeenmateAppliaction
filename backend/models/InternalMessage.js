@@ -80,7 +80,12 @@ const InternalMessage = {
         (
           SELECT 
             CASE 
-              WHEN (m.message_text IS NULL OR TRIM(m.message_text) = '') AND m.media_urls IS NOT NULL THEN '📷 Photo'
+              WHEN (m.message_text IS NULL OR TRIM(m.message_text) = '') AND m.media_urls IS NOT NULL THEN
+                CASE
+                  WHEN m.message_type = 'video' THEN '🎥 Video'
+                  WHEN m.message_type = 'document' THEN '📄 Document'
+                  ELSE '📷 Photo'
+                END
               ELSE m.message_text 
             END
           FROM internal_messages m 

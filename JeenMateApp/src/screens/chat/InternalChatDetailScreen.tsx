@@ -16,10 +16,12 @@ import {
   Dimensions,
   Image,
   PermissionsAndroid,
+  Linking,
 } from 'react-native';
 import { useRoute, useNavigation } from '@react-navigation/native';
 import { launchImageLibrary, launchCamera } from 'react-native-image-picker';
-import { useInternalChatStore, InternalChatMessage, SelectedImage } from '../../store/internalChatStore';
+import DocumentPicker, { types as docTypes } from 'react-native-document-picker';
+import { useInternalChatStore, InternalChatMessage, SelectedMedia, SelectedImage } from '../../store/internalChatStore';
 import { useAuthStore } from '../../store/authStore';
 import { useTaskStore, TeamMember } from '../../store/taskStore';
 import { Header } from '../../components/common/Header';
@@ -133,7 +135,8 @@ export const InternalChatDetailScreen: React.FC = () => {
   } = useInternalChatStore();
 
   const [inputText, setInputText] = useState('');
-  const [selectedImages, setSelectedImages] = useState<SelectedImage[]>([]);
+  const [selectedImages, setSelectedImages] = useState<SelectedMedia[]>([]);
+  const [attachmentModalVisible, setAttachmentModalVisible] = useState(false);
   const flatListRef = useRef<FlatList<any>>(null);
   const typingTimeoutRef = useRef<any>(null);
 
@@ -352,96 +355,168 @@ export const InternalChatDetailScreen: React.FC = () => {
     }
   };
 
-  // Image Selection Handler (Supports Single or Multiple max 5)
-  const handlePickImages = () => {
-    const currentCount = selectedImages.length;
-    if (currentCount >= 5) {
-      Alert.alert('Limit Reached', 'You can select a maximum of 5 images per message.');
+  const handlePickCamera = async () => {
+    setAttachmentModalVisible(false);
+    const currentImages = selectedImages.filter((m) => m.mediaType === 'image');
+    if (currentImages.length >= 5) {
+      Alert.alert('Limit Reached', 'You can select a maximum of 5 photos per message.');
       return;
     }
 
-    Alert.alert(
-      'Send Photos',
-      'Select source',
-      [
-        {
-          text: 'Camera',
-          onPress: async () => {
-            const hasPermission = await requestCameraPermission();
-            if (!hasPermission) {
-              Alert.alert('Permission Required', 'Camera permission is needed to take a photo.');
-              return;
-            }
+    const hasPermission = await requestCameraPermission();
+    if (!hasPermission) {
+      Alert.alert('Permission Required', 'Camera permission is needed to take a photo.');
+      return;
+    }
 
-            try {
-              const res = await launchCamera({
-                mediaType: 'photo',
-                quality: 0.8,
-                saveToPhotos: false,
-              });
+    try {
+      const res = await launchCamera({
+        mediaType: 'photo',
+        quality: 0.8,
+        saveToPhotos: false,
+      });
 
-              if (res.didCancel) return;
-              if (res.errorCode) {
-                Alert.alert('Camera Error', res.errorMessage || res.errorCode);
-                return;
-              }
+      if (res.didCancel) return;
+      if (res.errorCode) {
+        Alert.alert('Camera Error', res.errorMessage || res.errorCode);
+        return;
+      }
 
-              if (res.assets && res.assets.length > 0) {
-                const newImgs: SelectedImage[] = res.assets.map((a) => ({
-                  uri: a.uri!,
-                  fileName: a.fileName || `photo_${Date.now()}.jpg`,
-                  type: a.type || 'image/jpeg',
-                  fileSize: a.fileSize,
-                }));
-                setSelectedImages((prev) => [...prev, ...newImgs].slice(0, 5));
-              }
-            } catch (err: any) {
-              console.warn('[Camera] Error:', err);
-              Alert.alert('Error', err?.message || 'Failed to open camera');
-            }
-          },
-        },
-        {
-          text: 'Photo Gallery (Max 5)',
-          onPress: async () => {
-            await requestGalleryPermission();
-
-            try {
-              const remaining = 5 - selectedImages.length;
-              const res = await launchImageLibrary({
-                mediaType: 'photo',
-                selectionLimit: remaining,
-                quality: 0.8,
-              });
-
-              if (res.didCancel) return;
-              if (res.errorCode) {
-                Alert.alert('Gallery Error', res.errorMessage || res.errorCode);
-                return;
-              }
-
-              if (res.assets && res.assets.length > 0) {
-                const newImgs: SelectedImage[] = res.assets.map((a) => ({
-                  uri: a.uri!,
-                  fileName: a.fileName || `image_${Date.now()}.jpg`,
-                  type: a.type || 'image/jpeg',
-                  fileSize: a.fileSize,
-                }));
-                setSelectedImages((prev) => [...prev, ...newImgs].slice(0, 5));
-              }
-            } catch (err: any) {
-              console.warn('[Gallery] Error:', err);
-              Alert.alert('Error', err?.message || 'Failed to open photo gallery');
-            }
-          },
-        },
-        {
-          text: 'Cancel',
-          style: 'cancel',
-        },
-      ]
-    );
+      if (res.assets && res.assets.length > 0) {
+        const newImgs: SelectedMedia[] = res.assets.map((a) => ({
+          uri: a.uri!,
+          fileName: a.fileName || `photo_${Date.now()}.jpg`,
+          type: a.type || 'image/jpeg',
+          fileSize: a.fileSize,
+          mediaType: 'image',
+        }));
+        setSelectedImages([...currentImages, ...newImgs].slice(0, 5));
+      }
+    } catch (err: any) {
+      console.warn('[Camera] Error:', err);
+      Alert.alert('Error', err?.message || 'Failed to open camera');
+    }
   };
+
+  const handlePickGallery = async () => {
+    setAttachmentModalVisible(false);
+    const currentImages = selectedImages.filter((m) => m.mediaType === 'image');
+    if (currentImages.length >= 5) {
+      Alert.alert('Limit Reached', 'You can select a maximum of 5 photos per message.');
+      return;
+    }
+
+    await requestGalleryPermission();
+
+    try {
+      const remaining = 5 - currentImages.length;
+      const res = await launchImageLibrary({
+        mediaType: 'photo',
+        selectionLimit: remaining,
+        quality: 0.8,
+      });
+
+      if (res.didCancel) return;
+      if (res.errorCode) {
+        Alert.alert('Gallery Error', res.errorMessage || res.errorCode);
+        return;
+      }
+
+      if (res.assets && res.assets.length > 0) {
+        const newImgs: SelectedMedia[] = res.assets.map((a) => ({
+          uri: a.uri!,
+          fileName: a.fileName || `image_${Date.now()}.jpg`,
+          type: a.type || 'image/jpeg',
+          fileSize: a.fileSize,
+          mediaType: 'image',
+        }));
+        setSelectedImages([...currentImages, ...newImgs].slice(0, 5));
+      }
+    } catch (err: any) {
+      console.warn('[Gallery] Error:', err);
+      Alert.alert('Error', err?.message || 'Failed to open photo gallery');
+    }
+  };
+
+  const handlePickVideo = async () => {
+    setAttachmentModalVisible(false);
+    await requestGalleryPermission();
+
+    try {
+      const res = await launchImageLibrary({
+        mediaType: 'video',
+        selectionLimit: 1,
+      });
+
+      if (res.didCancel) return;
+      if (res.errorCode) {
+        Alert.alert('Video Error', res.errorMessage || res.errorCode);
+        return;
+      }
+
+      if (res.assets && res.assets.length > 0) {
+        const a = res.assets[0];
+        const newVideo: SelectedMedia = {
+          uri: a.uri!,
+          fileName: a.fileName || `video_${Date.now()}.mp4`,
+          type: a.type || 'video/mp4',
+          fileSize: a.fileSize,
+          duration: a.duration,
+          mediaType: 'video',
+        };
+        // Strictly single selection for video
+        setSelectedImages([newVideo]);
+      }
+    } catch (err: any) {
+      console.warn('[Video] Error:', err);
+      Alert.alert('Error', err?.message || 'Failed to open video picker');
+    }
+  };
+
+  const handlePickDocument = async () => {
+    setAttachmentModalVisible(false);
+
+    try {
+      const res = await DocumentPicker.pickSingle({
+        type: [
+          docTypes.pdf,
+          docTypes.doc,
+          docTypes.docx,
+          docTypes.allFiles,
+          'application/pdf',
+          'application/msword',
+          'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        ],
+        copyTo: 'cachesDirectory',
+      });
+
+      if (res) {
+        const fileUri = res.fileCopyUri || res.uri;
+        const newDoc: SelectedMedia = {
+          uri: fileUri,
+          fileName: res.name || `doc_${Date.now()}.pdf`,
+          type: res.type || 'application/pdf',
+          fileSize: res.size || undefined,
+          mediaType: 'document',
+        };
+        // Strictly single selection for document
+        setSelectedImages([newDoc]);
+      }
+    } catch (err: any) {
+      if (DocumentPicker.isCancel(err)) {
+        return;
+      }
+      console.warn('[Document] Error:', err);
+      Alert.alert('Error', err?.message || 'Failed to pick document');
+    }
+  };
+
+  const handleAttachmentMenu = () => {
+    Keyboard.dismiss();
+    setAttachmentModalVisible(true);
+  };
+
+  const handlePickImages = handleAttachmentMenu;
 
   const handleSend = async () => {
     const trimmed = inputText.trim();
@@ -717,6 +792,14 @@ export const InternalChatDetailScreen: React.FC = () => {
     const hasMedia = mediaUrls.length > 0;
     const hasText = item.message_text && item.message_text.trim().length > 0;
 
+    const isVideoMsg =
+      item.message_type === 'video' ||
+      mediaUrls.some((u) => Boolean(u.match(/\.(mp4|mov|3gp|mkv)($|\?)/i)));
+
+    const isDocMsg =
+      item.message_type === 'document' ||
+      mediaUrls.some((u) => Boolean(u.match(/\.(pdf|doc|docx)($|\?)/i)));
+
     return (
       <View
         style={[
@@ -731,10 +814,115 @@ export const InternalChatDetailScreen: React.FC = () => {
             hasMedia && styles.bubbleWithMedia,
           ]}
         >
-          {/* Images Section */}
+          {/* Media Section */}
           {hasMedia && (
             <View style={styles.bubbleMediaContainer}>
-              {renderImageGrid(mediaUrls, isMe)}
+              {isVideoMsg ? (
+                mediaUrls.map((url, idx) => {
+                  const fullUrl = getFullImageUrl(url);
+                  const filename = url.split('/').pop() || 'Video';
+                  return (
+                    <TouchableOpacity
+                      key={idx}
+                      style={styles.internalVideoCard}
+                      activeOpacity={0.85}
+                      onPress={() => {
+                        if (fullUrl) {
+                          Linking.openURL(fullUrl).catch(() =>
+                            Alert.alert('Video', 'Cannot open video URL directly.')
+                          );
+                        }
+                      }}
+                    >
+                      <View style={styles.internalVideoPlayCircle}>
+                        <Icon name="play" size={22} color="#FFFFFF" strokeWidth={2.5} />
+                      </View>
+                      <View style={styles.internalVideoDetails}>
+                        <Text
+                          style={[
+                            styles.internalVideoTitle,
+                            isMe ? styles.textWhite : styles.textDark,
+                          ]}
+                          numberOfLines={1}
+                        >
+                          {filename}
+                        </Text>
+                        <Text
+                          style={[
+                            styles.internalVideoSub,
+                            isMe ? styles.timeMe : styles.timeOther,
+                          ]}
+                        >
+                          Video • Tap to play
+                        </Text>
+                      </View>
+                    </TouchableOpacity>
+                  );
+                })
+              ) : isDocMsg ? (
+                mediaUrls.map((url, idx) => {
+                  const fullUrl = getFullImageUrl(url);
+                  const filename = url.split('/').pop() || 'Document';
+                  const ext = (filename.split('.').pop() || 'DOC').toUpperCase();
+                  const isPdf = ext === 'PDF';
+                  return (
+                    <TouchableOpacity
+                      key={idx}
+                      style={[
+                        styles.internalDocCard,
+                        isMe ? styles.internalDocCardMe : styles.internalDocCardOther,
+                      ]}
+                      activeOpacity={0.85}
+                      onPress={() => {
+                        if (fullUrl) {
+                          Linking.openURL(fullUrl).catch(() =>
+                            Alert.alert('Document', `File: ${filename}`)
+                          );
+                        }
+                      }}
+                    >
+                      <View
+                        style={[
+                          styles.internalDocIconWrapper,
+                          isPdf ? styles.internalDocIconPdf : styles.internalDocIconWord,
+                        ]}
+                      >
+                        <Icon name="document" size={18} color="#FFFFFF" strokeWidth={2.2} />
+                        <Text style={styles.internalDocExtBadge}>{ext}</Text>
+                      </View>
+                      <View style={styles.internalDocDetails}>
+                        <Text
+                          style={[
+                            styles.internalDocTitle,
+                            isMe ? styles.textWhite : styles.textDark,
+                          ]}
+                          numberOfLines={1}
+                        >
+                          {filename}
+                        </Text>
+                        <Text
+                          style={[
+                            styles.internalDocSub,
+                            isMe ? styles.timeMe : styles.timeOther,
+                          ]}
+                        >
+                          {ext} • Tap to view
+                        </Text>
+                      </View>
+                      <View style={styles.internalDocDownloadIcon}>
+                        <Icon
+                          name="download"
+                          size={15}
+                          color={isMe ? '#FFFFFF' : COLORS.primaryNavy}
+                          strokeWidth={2}
+                        />
+                      </View>
+                    </TouchableOpacity>
+                  );
+                })
+              ) : (
+                renderImageGrid(mediaUrls, isMe)
+              )}
             </View>
           )}
 
@@ -855,14 +1043,18 @@ export const InternalChatDetailScreen: React.FC = () => {
         </View>
       )}
 
-      {/* Attached Images Preview Tray (Max 5) */}
+      {/* Attached Media Preview Tray */}
       {selectedImages.length > 0 && (
         <View style={styles.imagePreviewTray}>
           <View style={styles.previewHeaderRow}>
             <View style={styles.previewHeaderLeft}>
-              <Icon name="image" size={14} color={COLORS.primary} />
+              <Icon name="paperclip" size={14} color={COLORS.primary} />
               <Text style={styles.previewTitle}>
-                Attached Images ({selectedImages.length}/5)
+                {selectedImages[0]?.mediaType === 'video'
+                  ? 'Attached Video (1)'
+                  : selectedImages[0]?.mediaType === 'document'
+                  ? 'Attached Document (1)'
+                  : `Attached Photos (${selectedImages.length}/5)`}
               </Text>
             </View>
             <TouchableOpacity
@@ -878,33 +1070,55 @@ export const InternalChatDetailScreen: React.FC = () => {
             showsHorizontalScrollIndicator={false}
             contentContainerStyle={styles.previewScrollContent}
           >
-            {selectedImages.map((img, idx) => (
-              <View key={`${img.uri}-${idx}`} style={styles.previewThumbWrapper}>
-                <Image source={{ uri: img.uri }} style={styles.previewThumb} resizeMode="cover" />
-                <TouchableOpacity
-                  style={styles.previewRemoveBtn}
-                  onPress={() => setSelectedImages((prev) => prev.filter((_, i) => i !== idx))}
-                  activeOpacity={0.7}
-                  hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
-                >
-                  <Icon name="x" size={10} color={COLORS.bgWhite} strokeWidth={3} />
-                </TouchableOpacity>
-                <View style={styles.previewBadge}>
-                  <Text style={styles.previewBadgeText}>{idx + 1}</Text>
+            {selectedImages.map((media, idx) => {
+              const isVid = media.mediaType === 'video';
+              const isDoc = media.mediaType === 'document';
+              return (
+                <View key={`${media.uri}-${idx}`} style={styles.previewThumbWrapper}>
+                  {isVid ? (
+                    <View style={styles.previewVideoBox}>
+                      <Icon name="video" size={20} color="#FFFFFF" strokeWidth={2.2} />
+                      <Text style={styles.previewMediaLabel} numberOfLines={1}>
+                        Video
+                      </Text>
+                    </View>
+                  ) : isDoc ? (
+                    <View style={styles.previewDocBox}>
+                      <Icon name="document" size={20} color="#FFFFFF" strokeWidth={2.2} />
+                      <Text style={styles.previewMediaLabel} numberOfLines={1}>
+                        {(media.fileName?.split('.').pop() || 'DOC').toUpperCase()}
+                      </Text>
+                    </View>
+                  ) : (
+                    <Image source={{ uri: media.uri }} style={styles.previewThumb} resizeMode="cover" />
+                  )}
+                  <TouchableOpacity
+                    style={styles.previewRemoveBtn}
+                    onPress={() => setSelectedImages((prev) => prev.filter((_, i) => i !== idx))}
+                    activeOpacity={0.7}
+                    hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+                  >
+                    <Icon name="x" size={10} color={COLORS.bgWhite} strokeWidth={3} />
+                  </TouchableOpacity>
+                  <View style={styles.previewBadge}>
+                    <Text style={styles.previewBadgeText}>{idx + 1}</Text>
+                  </View>
                 </View>
-              </View>
-            ))}
+              );
+            })}
 
-            {selectedImages.length < 5 && (
-              <TouchableOpacity
-                style={styles.addMoreImagesBtn}
-                onPress={handlePickImages}
-                activeOpacity={0.7}
-              >
-                <Icon name="plus" size={18} color={COLORS.primary} strokeWidth={2.5} />
-                <Text style={styles.addMoreText}>Add</Text>
-              </TouchableOpacity>
-            )}
+            {/* Show Add button only for photos (images) up to max 5 */}
+            {!selectedImages.some((m) => m.mediaType === 'video' || m.mediaType === 'document') &&
+              selectedImages.length < 5 && (
+                <TouchableOpacity
+                  style={styles.addMoreImagesBtn}
+                  onPress={handleAttachmentMenu}
+                  activeOpacity={0.7}
+                >
+                  <Icon name="plus" size={18} color={COLORS.primary} strokeWidth={2.5} />
+                  <Text style={styles.addMoreText}>Add</Text>
+                </TouchableOpacity>
+              )}
           </ScrollView>
         </View>
       )}
@@ -923,7 +1137,7 @@ export const InternalChatDetailScreen: React.FC = () => {
         {/* Attachment Button */}
         <TouchableOpacity
           style={styles.attachBtn}
-          onPress={handlePickImages}
+          onPress={handleAttachmentMenu}
           activeOpacity={0.7}
           hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
         >
@@ -960,6 +1174,95 @@ export const InternalChatDetailScreen: React.FC = () => {
           )}
         </TouchableOpacity>
       </View>
+
+      {/* WhatsApp-Style Attachment Bottom Sheet Modal */}
+      <Modal
+        visible={attachmentModalVisible}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={() => setAttachmentModalVisible(false)}
+      >
+        <TouchableOpacity
+          style={styles.attachmentModalOverlay}
+          activeOpacity={1}
+          onPress={() => setAttachmentModalVisible(false)}
+        >
+          <View style={styles.attachmentSheet}>
+            <View style={styles.attachmentHandleBar} />
+
+            {/* Header: Title on Left, Cross Close Icon (✕) on Right */}
+            <View style={styles.attachmentHeaderRow}>
+              <View style={styles.attachmentTitleContainer}>
+                <Text style={styles.attachmentTitle}>Attach Files</Text>
+                <Text style={styles.attachmentSubTitle}>Share documents, photos or videos</Text>
+              </View>
+              <TouchableOpacity
+                style={styles.attachmentCloseBtn}
+                onPress={() => setAttachmentModalVisible(false)}
+                activeOpacity={0.7}
+                hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+              >
+                <Icon name="x" size={18} color={COLORS.textDark} strokeWidth={2.5} />
+              </TouchableOpacity>
+            </View>
+
+            {/* 4-Option Grid */}
+            <View style={styles.attachmentGrid}>
+              {/* Document Option (PDF, Word) */}
+              <TouchableOpacity
+                style={styles.attachmentOption}
+                activeOpacity={0.75}
+                onPress={handlePickDocument}
+              >
+                <View style={[styles.attachmentIconCircle, { backgroundColor: '#7C3AED' }]}>
+                  <Icon name="document" size={26} color="#FFFFFF" strokeWidth={2.2} />
+                </View>
+                <Text style={styles.attachmentLabel}>Document</Text>
+                <Text style={styles.attachmentSubLabel}>PDF, Word (1)</Text>
+              </TouchableOpacity>
+
+              {/* Camera Option */}
+              <TouchableOpacity
+                style={styles.attachmentOption}
+                activeOpacity={0.75}
+                onPress={handlePickCamera}
+              >
+                <View style={[styles.attachmentIconCircle, { backgroundColor: '#EC4899' }]}>
+                  <Icon name="camera" size={26} color="#FFFFFF" strokeWidth={2.2} />
+                </View>
+                <Text style={styles.attachmentLabel}>Camera</Text>
+                <Text style={styles.attachmentSubLabel}>Take photo</Text>
+              </TouchableOpacity>
+
+              {/* Gallery Option */}
+              <TouchableOpacity
+                style={styles.attachmentOption}
+                activeOpacity={0.75}
+                onPress={handlePickGallery}
+              >
+                <View style={[styles.attachmentIconCircle, { backgroundColor: '#3B82F6' }]}>
+                  <Icon name="image" size={26} color="#FFFFFF" strokeWidth={2.2} />
+                </View>
+                <Text style={styles.attachmentLabel}>Gallery</Text>
+                <Text style={styles.attachmentSubLabel}>Photos (max 5)</Text>
+              </TouchableOpacity>
+
+              {/* Video Option */}
+              <TouchableOpacity
+                style={styles.attachmentOption}
+                activeOpacity={0.75}
+                onPress={handlePickVideo}
+              >
+                <View style={[styles.attachmentIconCircle, { backgroundColor: '#06B6D4' }]}>
+                  <Icon name="video" size={26} color="#FFFFFF" strokeWidth={2.2} />
+                </View>
+                <Text style={styles.attachmentLabel}>Video</Text>
+                <Text style={styles.attachmentSubLabel}>Video (1)</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </TouchableOpacity>
+      </Modal>
 
       {/* Fullscreen Image Lightbox Viewer Modal */}
       <Modal
@@ -1995,5 +2298,216 @@ const styles = StyleSheet.create({
     color: COLORS.primaryNavy,
     letterSpacing: 0.5,
     textTransform: 'uppercase',
+  },
+  internalVideoCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#1E293B',
+    borderRadius: RADIUS.md,
+    padding: 10,
+    width: 220,
+    marginBottom: 4,
+  },
+  internalVideoPlayCircle: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 10,
+  },
+  internalVideoDetails: {
+    flex: 1,
+  },
+  internalVideoTitle: {
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  internalVideoSub: {
+    fontSize: 10,
+    marginTop: 2,
+  },
+  internalDocCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 10,
+    borderRadius: RADIUS.md,
+    width: 230,
+    marginBottom: 4,
+  },
+  internalDocCardMe: {
+    backgroundColor: 'rgba(255, 255, 255, 0.15)',
+  },
+  internalDocCardOther: {
+    backgroundColor: 'rgba(26, 59, 113, 0.08)',
+  },
+  internalDocIconWrapper: {
+    width: 38,
+    height: 38,
+    borderRadius: RADIUS.sm,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 10,
+    position: 'relative',
+  },
+  internalDocIconPdf: {
+    backgroundColor: '#E11D48',
+  },
+  internalDocIconWord: {
+    backgroundColor: '#2563EB',
+  },
+  internalDocExtBadge: {
+    position: 'absolute',
+    bottom: 2,
+    fontSize: 7.5,
+    fontWeight: '800',
+    color: '#FFFFFF',
+    textTransform: 'uppercase',
+  },
+  internalDocDetails: {
+    flex: 1,
+  },
+  internalDocTitle: {
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  internalDocSub: {
+    fontSize: 10,
+    marginTop: 2,
+  },
+  internalDocDownloadIcon: {
+    marginLeft: 6,
+    padding: 4,
+  },
+  previewVideoBox: {
+    width: 60,
+    height: 60,
+    borderRadius: RADIUS.sm,
+    backgroundColor: '#06B6D4',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 4,
+  },
+  previewDocBox: {
+    width: 60,
+    height: 60,
+    borderRadius: RADIUS.sm,
+    backgroundColor: '#7C3AED',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 4,
+  },
+  previewMediaLabel: {
+    color: '#FFFFFF',
+    fontSize: 9,
+    fontWeight: '700',
+    marginTop: 2,
+    textAlign: 'center',
+  },
+  attachmentModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.45)',
+    justifyContent: 'flex-end',
+  },
+  attachmentSheet: {
+    backgroundColor: '#FFFFFF',
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    paddingHorizontal: 20,
+    paddingTop: 12,
+    paddingBottom: Platform.OS === 'ios' ? 36 : 24,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: -4 },
+    shadowOpacity: 0.15,
+    shadowRadius: 12,
+    elevation: 24,
+  },
+  attachmentHandleBar: {
+    width: 38,
+    height: 4,
+    backgroundColor: '#E2E8F0',
+    borderRadius: 2,
+    alignSelf: 'center',
+    marginBottom: 12,
+  },
+  attachmentHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 20,
+    paddingHorizontal: 4,
+  },
+  attachmentTitleContainer: {
+    flex: 1,
+  },
+  attachmentTitle: {
+    fontSize: 17,
+    fontWeight: '700',
+    color: COLORS.primaryNavy,
+    letterSpacing: -0.2,
+  },
+  attachmentSubTitle: {
+    fontSize: 12,
+    color: COLORS.textMuted,
+    marginTop: 2,
+  },
+  attachmentCloseBtn: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: '#F1F5F9',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  attachmentGrid: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 6,
+    marginBottom: 10,
+  },
+  attachmentOption: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: 72,
+  },
+  attachmentIconCircle: {
+    width: 58,
+    height: 58,
+    borderRadius: 29,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 8,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.18,
+    shadowRadius: 6,
+    elevation: 5,
+  },
+  attachmentLabel: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: COLORS.textDark,
+    textAlign: 'center',
+  },
+  attachmentSubLabel: {
+    fontSize: 10,
+    fontWeight: '400',
+    color: COLORS.textMuted,
+    textAlign: 'center',
+    marginTop: 2,
+  },
+  textWhite: {
+    color: '#FFFFFF',
+  },
+  textDark: {
+    color: COLORS.textDark,
+  },
+  timeMe: {
+    color: 'rgba(255, 255, 255, 0.7)',
+  },
+  timeOther: {
+    color: COLORS.textMuted,
   },
 });

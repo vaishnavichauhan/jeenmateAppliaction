@@ -1,4 +1,4 @@
-const { Client, LocalAuth } = require('whatsapp-web.js');
+const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
 const qrcode = require('qrcode');
 const fs = require('fs');
 const path = require('path');
@@ -103,10 +103,6 @@ class WhatsAppService {
           dataPath: config.WHATSAPP_SESSION_PATH,
           clientId: `account-${this.accountId}`
         }),
-        webVersionCache: {
-          type: 'remote',
-          remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-js/main/dist/wppconnect-wa.js'
-        },
         puppeteer: puppeteerOptions
       });
 
@@ -227,7 +223,7 @@ class WhatsAppService {
       pool.execute(
         'UPDATE whatsapp_accounts SET status = ?, phone_number = ?, whatsapp_name = ? WHERE id = ?',
         ['online', this.botPhone, this.botName, this.accountId]
-      ).catch(() => {});
+      ).catch(() => { });
 
       this.broadcastCurrentStatus();
 
@@ -252,7 +248,7 @@ class WhatsAppService {
       pool.execute(
         'UPDATE whatsapp_accounts SET status = "disconnected", phone_number = NULL WHERE id = ?',
         [this.accountId]
-      ).catch(() => {});
+      ).catch(() => { });
       await this.purgeUserWhatsAppData();
       this.broadcastCurrentStatus();
     });
@@ -309,10 +305,10 @@ class WhatsAppService {
         const safeCallId = (call.id && typeof call.id === 'string')
           ? call.id
           : ((call.id && typeof call.id === 'object' && call.id._serialized)
-              ? call.id._serialized
-              : ((call.id && typeof call.id === 'object' && call.id.id)
-                  ? call.id.id
-                  : `call_evt_${Date.now()}`));
+            ? call.id._serialized
+            : ((call.id && typeof call.id === 'object' && call.id.id)
+              ? call.id.id
+              : `call_evt_${Date.now()}`));
 
         const rawCallJson = JSON.stringify({
           id: safeCallId,
@@ -561,16 +557,65 @@ class WhatsAppService {
     const safeText = typeof text === 'string' ? text : String(text || '');
     const safeMsgId = (msg.id && msg.id._serialized) ? msg.id._serialized : (typeof msg.id === 'string' ? msg.id : null);
 
+    const isImageMsg = mType === 'image' || (safeText && safeText.startsWith('/9j/')) || (msg._data && msg._data.body && String(msg._data.body).startsWith('/9j/'));
+    const isVideoMsg = mType === 'video';
+    const isDocMsg = mType === 'document';
+    const isMediaMsg = isImageMsg || isVideoMsg || isDocMsg || !!msg.hasMedia;
+
+    let initialMetadata = null;
+    if (isImageMsg) {
+      const rawB64 = (msg._data && msg._data.body && String(msg._data.body).startsWith('/9j/'))
+        ? msg._data.body
+        : (safeText && safeText.startsWith('/9j/') ? safeText : null);
+      initialMetadata = {
+        isImage: true,
+        mediaUrl: rawB64 ? (rawB64.startsWith('data:') ? rawB64 : `data:image/jpeg;base64,${rawB64}`) : null,
+        caption: msg.caption || ''
+      };
+    } else if (isVideoMsg) {
+      initialMetadata = {
+        isVideo: true,
+        mediaUrl: null,
+        filename: msg.filename || 'video.mp4',
+        mimetype: msg.mimetype || 'video/mp4',
+        caption: msg.caption || ''
+      };
+    } else if (isDocMsg) {
+      initialMetadata = {
+        isDocument: true,
+        mediaUrl: null,
+        filename: msg.filename || msg._data?.filename || 'document',
+        mimetype: msg.mimetype || 'application/octet-stream',
+        caption: msg.caption || ''
+      };
+    }
+
     let existCheck = [];
     if (safeMsgId) {
       [existCheck] = await pool.execute(
-        'SELECT id, whatsapp_message_id, message FROM messages WHERE whatsapp_account_id = ? AND conversation_id = ? AND whatsapp_message_id = ? LIMIT 1',
+        'SELECT id, whatsapp_message_id, message, metadata FROM messages WHERE whatsapp_account_id = ? AND conversation_id = ? AND whatsapp_message_id = ? LIMIT 1',
         [accId, convId, safeMsgId]
       );
     } else {
       [existCheck] = await pool.execute(
-        'SELECT id, whatsapp_message_id, message FROM messages WHERE whatsapp_account_id = ? AND conversation_id = ? AND direction = ? AND whatsapp_timestamp = ? AND message = ? LIMIT 1',
+        'SELECT id, whatsapp_message_id, message, metadata FROM messages WHERE whatsapp_account_id = ? AND conversation_id = ? AND direction = ? AND whatsapp_timestamp = ? AND message = ? LIMIT 1',
         [accId, convId, direction, msgTime, safeText]
+      );
+    }
+
+    if (existCheck.length === 0 && isMediaMsg && msgTime) {
+      const fifteenSecAgo = msgTime - 15000;
+      const fifteenSecAfter = msgTime + 15000;
+      [existCheck] = await pool.execute(
+        `SELECT id, whatsapp_message_id, message, metadata FROM messages 
+         WHERE whatsapp_account_id = ? AND conversation_id = ? AND direction = ? 
+           AND (message_type IN ('image', 'video', 'document') OR message IN ('Images', 'Image', '📷 Photo', 'Video', '🎥 Video', 'Document', '📄 Document') OR message LIKE '/9j/%' OR metadata IS NOT NULL)
+           AND (
+             (whatsapp_timestamp IS NOT NULL AND whatsapp_timestamp BETWEEN ? AND ?)
+             OR (whatsapp_timestamp IS NULL AND created_at >= (NOW() - INTERVAL 1 MINUTE))
+           )
+         ORDER BY id DESC LIMIT 1`,
+        [accId, convId, direction, fifteenSecAgo, fifteenSecAfter]
       );
     }
 
@@ -582,13 +627,30 @@ class WhatsAppService {
       if (safeText === 'Video' && existingMsg.message === 'Images') {
         await pool.execute('UPDATE messages SET message = ? WHERE id = ?', ['Video', existingMsg.id]);
       }
+      if (isMediaMsg && initialMetadata && initialMetadata.mediaUrl) {
+        let existingHasMedia = false;
+        if (existingMsg.metadata) {
+          if (typeof existingMsg.metadata === 'object' && existingMsg.metadata.mediaUrl) {
+            existingHasMedia = true;
+          } else if (typeof existingMsg.metadata === 'string' && existingMsg.metadata.includes('mediaUrl')) {
+            existingHasMedia = true;
+          }
+        }
+        if (!existingHasMedia) {
+          const typeToSet = isImageMsg ? 'image' : (isVideoMsg ? 'video' : (isDocMsg ? 'document' : 'image'));
+          await pool.execute('UPDATE messages SET metadata = ?, message_type = ? WHERE id = ?', [JSON.stringify(initialMetadata), typeToSet, existingMsg.id]);
+        }
+      }
       return;
     }
 
+    const msgTypeToSave = isImageMsg ? 'image' : (isVideoMsg ? 'video' : (isDocMsg ? 'document' : (mType === 'audio' || mType === 'ptt' ? 'audio' : 'text')));
+    const metadataJson = initialMetadata ? JSON.stringify(initialMetadata) : null;
+
     const [insertMsg] = await pool.execute(
-      `INSERT INTO messages (conversation_id, customer_id, direction, message, whatsapp_message_id, message_type, whatsapp_timestamp, status, created_at, user_id, whatsapp_account_id)
-       VALUES (?, ?, ?, ?, ?, 'text', ?, 'delivered', ?, ?, ?)`,
-      [convId, customerId, direction, safeText, safeMsgId, msgTime, utcStr, userId, accId]
+      `INSERT INTO messages (conversation_id, customer_id, direction, message, whatsapp_message_id, message_type, whatsapp_timestamp, status, created_at, user_id, whatsapp_account_id, metadata)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'delivered', ?, ?, ?, ?)`,
+      [convId, customerId, direction, safeText, safeMsgId, msgTypeToSave, msgTime, utcStr, userId, accId, metadataJson]
     );
 
     const savedMsg = await Message.findById(insertMsg.insertId);
@@ -598,27 +660,188 @@ class WhatsAppService {
     socketService.broadcastNewMessage(convId, savedMsg, accId);
     socketService.broadcastConversationUpdate(updatedConv, accId);
     console.log(`[WhatsApp:Account ${accId}] ${direction === 'outgoing' ? 'Sent to' : 'Received from'} ${contactName} (${phoneNumber}): "${text}"`);
+
+    // Download high-resolution media in background and broadcast update
+    if (isMediaMsg && safeMsgId) {
+      this.downloadMessageMedia(safeMsgId).then(async (result) => {
+        if (result && result.url) {
+          const updatedMeta = {
+            ...(initialMetadata || {}),
+            isImage: isImageMsg,
+            isVideo: isVideoMsg,
+            isDocument: isDocMsg,
+            mediaUrl: result.url,
+            filename: result.filename || initialMetadata?.filename,
+            mimetype: result.mimetype || initialMetadata?.mimetype,
+            caption: msg.caption || ''
+          };
+          await pool.execute('UPDATE messages SET metadata = ? WHERE id = ?', [JSON.stringify(updatedMeta), insertMsg.insertId]);
+          const refreshed = await Message.findById(insertMsg.insertId);
+          socketService.broadcastNewMessage(convId, refreshed, accId);
+        }
+      }).catch(() => {});
+    }
   }
 
-  async sendMessage(phoneNumber, text) {
+  async downloadMessageMedia(msgId) {
+    if (!this.client || !this.client.pupPage || !msgId) return null;
+    try {
+      const result = await this.client.pupPage.evaluate(async (mId) => {
+        try {
+          const msgCol = window.require ? window.require('WAWebCollections')?.Msg : null;
+          let msg = msgCol?.get ? msgCol.get(mId) : null;
+          if (!msg && msgCol?.getMessagesById) {
+            const res = await msgCol.getMessagesById([mId]);
+            msg = res?.messages?.[0] || null;
+          }
+          if (!msg) return null;
+
+          if (msg.mediaData && msg.mediaData.mediaStage !== 'RESOLVED' && msg.downloadMedia) {
+            try {
+              await msg.downloadMedia({ downloadEvenIfExpensive: true, rmrReason: 1 });
+            } catch (_) {}
+          }
+
+          const downloadManager = window.require ? window.require('WAWebDownloadManager')?.downloadManager : null;
+          if (downloadManager && msg.directPath && msg.encFilehash && msg.mediaKey) {
+            const decryptedMedia = await downloadManager.downloadAndMaybeDecrypt({
+              directPath: msg.directPath,
+              encFilehash: msg.encFilehash,
+              filehash: msg.filehash,
+              mediaKey: msg.mediaKey,
+              mediaKeyTimestamp: msg.mediaKeyTimestamp,
+              type: msg.type || 'image',
+              signal: new AbortController().signal,
+              downloadQpl: { addAnnotations: function () { return this; }, addPoint: function () { return this; } },
+            });
+            if (decryptedMedia) {
+              const b64 = await window.WWebJS.arrayBufferToBase64Async(decryptedMedia);
+              const mime = msg.mimetype || (msg.type === 'video' ? 'video/mp4' : (msg.type === 'document' ? 'application/pdf' : 'image/jpeg'));
+              return { data: b64, mimetype: mime, filename: msg.filename, url: `data:${mime};base64,${b64}` };
+            }
+          }
+
+          const rawBody = (msg._data && msg._data.body) || msg.body || '';
+          if (rawBody && (rawBody.startsWith('/9j/') || rawBody.startsWith('data:image'))) {
+            const mime = msg.mimetype || 'image/jpeg';
+            const url = rawBody.startsWith('data:') ? rawBody : `data:${mime};base64,${rawBody}`;
+            return { data: rawBody, mimetype: mime, url };
+          }
+          return null;
+        } catch (e) {
+          return null;
+        }
+      }, msgId);
+      return result;
+    } catch (err) {
+      return null;
+    }
+  }
+
+  resolveDestinationChatId(phoneNumber, targetJid = null) {
+    if (targetJid && String(targetJid).includes('@g.us')) {
+      return String(targetJid);
+    }
+    if (phoneNumber && String(phoneNumber).includes('@g.us')) {
+      return String(phoneNumber);
+    }
+    if (phoneNumber && String(phoneNumber).startsWith('group-')) {
+      return `${String(phoneNumber).replace('group-', '')}@g.us`;
+    }
+    const cleanPhone = String(phoneNumber || '').replace(/[^0-9]/g, '');
+    return `${cleanPhone}@c.us`;
+  }
+
+  async sendMessage(phoneNumber, text, targetJid = null) {
     if (!this.isConnected || !this.client) {
       console.warn(`[WhatsApp:Account ${this.accountId}] Client not connected. Message saved locally.`);
       return { success: false, offlineSaved: true };
     }
 
     try {
-      const sanitized = phoneNumber.replace(/[^0-9]/g, '');
-      const chatId = `${sanitized}@c.us`;
+      const chatId = this.resolveDestinationChatId(phoneNumber, targetJid);
+      console.log(`[WhatsApp:Account ${this.accountId}] Sending text to chatId: ${chatId}`);
       const result = await this.client.sendMessage(chatId, text);
       const rawId = result?.id ? (result.id.id || result.id._serialized || (typeof result.id === 'string' ? result.id : null)) : null;
       const cleanId = (rawId && rawId.includes('_')) ? rawId.split('_').pop() : rawId;
-      return { 
-        success: true, 
+      return {
+        success: true,
         messageId: cleanId || rawId,
         serializedId: result?.id?._serialized || cleanId || rawId
       };
     } catch (err) {
       console.error(`[WhatsApp:Account ${this.accountId}] Send error:`, err.message);
+      return { success: false, error: err.message };
+    }
+  }
+
+  async sendMedia(phoneNumber, mediaDataOrPath, mimetype = 'image/jpeg', filename = 'image.jpg', caption = '', targetJid = null, options = {}) {
+    if (!this.isConnected || !this.client) {
+      console.warn(`[WhatsApp:Account ${this.accountId}] Client not connected. Media saved locally.`);
+      return { success: false, offlineSaved: true };
+    }
+
+    try {
+      const chatId = this.resolveDestinationChatId(phoneNumber, targetJid);
+      console.log(`[WhatsApp:Account ${this.accountId}] Sending media to chatId: ${chatId} (${filename}, mime: ${mimetype})`);
+
+      let media = null;
+      // 1. Check if mediaDataOrPath is a valid local file path on disk
+      if (typeof mediaDataOrPath === 'string' && (fs.existsSync(mediaDataOrPath) || mediaDataOrPath.startsWith('/') || mediaDataOrPath.startsWith('./'))) {
+        if (fs.existsSync(mediaDataOrPath)) {
+          media = MessageMedia.fromFilePath(mediaDataOrPath);
+          if (filename) media.filename = filename;
+          if (mimetype && mimetype !== 'application/octet-stream') media.mimetype = mimetype;
+        }
+      }
+
+      // 2. Fallback to base64 data string
+      if (!media) {
+        let finalMime = mimetype || 'image/jpeg';
+        let rawData = mediaDataOrPath;
+        if (typeof mediaDataOrPath === 'string' && mediaDataOrPath.startsWith('data:')) {
+          const parts = mediaDataOrPath.split(',');
+          const mimeMatch = parts[0].match(/data:([^;]+);/);
+          if (mimeMatch && mimeMatch[1]) {
+            finalMime = mimeMatch[1];
+          }
+          rawData = parts[1] || '';
+        } else if (typeof mediaDataOrPath === 'string' && mediaDataOrPath.includes(',')) {
+          rawData = mediaDataOrPath.split(',')[1];
+        }
+
+        const cleanBase64 = String(rawData || '').replace(/\s/g, '');
+        media = new MessageMedia(finalMime, cleanBase64, filename || 'file');
+      }
+
+      const sendOptions = { ...options };
+      if (caption && String(caption).trim() && !['📷 Photo', '🎥 Video', '📄 Document'].includes(String(caption).trim())) {
+        sendOptions.caption = String(caption).trim();
+      }
+
+      // If document, enable sendMediaAsDocument
+      const isDoc = (media.mimetype && (
+        media.mimetype.includes('pdf') ||
+        media.mimetype.includes('msword') ||
+        media.mimetype.includes('officedocument') ||
+        media.mimetype.includes('document')
+      )) || (filename && /\.(pdf|docx?|txt|xlsx?|pptx?)$/i.test(filename)) || options.sendMediaAsDocument;
+
+      if (isDoc) {
+        sendOptions.sendMediaAsDocument = true;
+      }
+
+      const result = await this.client.sendMessage(chatId, media, sendOptions);
+      const rawId = result?.id ? (result.id.id || result.id._serialized || (typeof result.id === 'string' ? result.id : null)) : null;
+      const cleanId = (rawId && rawId.includes('_')) ? rawId.split('_').pop() : rawId;
+      console.log(`[WhatsApp:Account ${this.accountId}] Media sent successfully! WA Message ID: ${cleanId || rawId}`);
+      return {
+        success: true,
+        messageId: cleanId || rawId,
+        serializedId: result?.id?._serialized || cleanId || rawId
+      };
+    } catch (err) {
+      console.error(`[WhatsApp:Account ${this.accountId}] Send media error:`, err.message);
       return { success: false, error: err.message };
     }
   }
@@ -1090,7 +1313,7 @@ class WhatsAppService {
           }
 
           const slice = uniqueMsgs.length > maxMsgs ? uniqueMsgs.slice(-maxMsgs) : uniqueMsgs;
-          return slice.map(m => {
+          return await Promise.all(slice.map(async (m) => {
             const isFromMe = !!(m.id?.fromMe || m.fromMe);
             let bodyText = m.body || '';
             const mType = String(m.type || 'chat').toLowerCase();
@@ -1195,11 +1418,52 @@ class WhatsAppService {
             const isImageMsg = mType === 'image' || !!m.isMedia || (bodyText && bodyText.startsWith('/9j/')) || (m._data && m._data.body && String(m._data.body).startsWith('/9j/'));
             let imageBase64 = null;
             if (isImageMsg) {
-              const rawB64 = (m._data && m._data.body && String(m._data.body).startsWith('/9j/'))
-                ? m._data.body
-                : (bodyText && bodyText.startsWith('/9j/') ? bodyText : null);
-              if (rawB64) {
-                imageBase64 = `data:image/jpeg;base64,${rawB64}`;
+              // 1. Check if mediaData already has full data
+              try {
+                const rawData = m.mediaData?.data || (m._data && m._data.mediaData && m._data.mediaData.data);
+                if (rawData) {
+                  const mime = m.mimetype || 'image/jpeg';
+                  imageBase64 = rawData.startsWith('data:') ? rawData : `data:${mime};base64,${rawData}`;
+                }
+              } catch (_) {}
+
+              // 2. If not yet extracted, try downloadAndMaybeDecrypt from WAWebDownloadManager
+              if (!imageBase64) {
+                try {
+                  const downloadManager = window.require ? window.require('WAWebDownloadManager')?.downloadManager : null;
+                  if (downloadManager && m.directPath && m.encFilehash && m.mediaKey) {
+                    if (m.mediaData && m.mediaData.mediaStage !== 'RESOLVED' && m.downloadMedia) {
+                      try {
+                        await m.downloadMedia({ downloadEvenIfExpensive: true, rmrReason: 1 });
+                      } catch (_) {}
+                    }
+                    const decryptedMedia = await downloadManager.downloadAndMaybeDecrypt({
+                      directPath: m.directPath,
+                      encFilehash: m.encFilehash,
+                      filehash: m.filehash,
+                      mediaKey: m.mediaKey,
+                      mediaKeyTimestamp: m.mediaKeyTimestamp,
+                      type: m.type || 'image',
+                      signal: new AbortController().signal,
+                      downloadQpl: { addAnnotations: function () { return this; }, addPoint: function () { return this; } },
+                    });
+                    if (decryptedMedia) {
+                      const b64Data = await window.WWebJS.arrayBufferToBase64Async(decryptedMedia);
+                      const mime = m.mimetype || 'image/jpeg';
+                      imageBase64 = `data:${mime};base64,${b64Data}`;
+                    }
+                  }
+                } catch (_) {}
+              }
+
+              // 3. Fallback to thumbnail base64
+              if (!imageBase64) {
+                const rawB64 = (m._data && m._data.body && String(m._data.body).startsWith('/9j/'))
+                  ? m._data.body
+                  : (bodyText && bodyText.startsWith('/9j/') ? bodyText : null);
+                if (rawB64) {
+                  imageBase64 = rawB64.startsWith('data:') ? rawB64 : `data:image/jpeg;base64,${rawB64}`;
+                }
               }
             }
 
@@ -1299,7 +1563,7 @@ class WhatsAppService {
               status: m.ack === 3 ? 'read' : (m.ack === 2 ? 'delivered' : 'sent'),
               metadata
             };
-          });
+          }));
         } catch (err) {
           return [];
         }
@@ -1314,7 +1578,7 @@ class WhatsAppService {
 
   async syncChats(options = {}) {
     if (!this.client || !this.client.pupPage) {
-      return { success: false, message: 'WhatsApp client is not ready yet. Please wait a moment.' };
+      return { success: false, message: 'WhatsApp is not ready yet. Please wait a moment.' };
     }
 
     try {
@@ -1402,7 +1666,7 @@ class WhatsAppService {
         let customerId = null;
         const isLidJid = jid.includes('@lid');
         const isGroupChat = chat.isGroup || jid.includes('@g.us');
-        
+
         // Build the most reliable lookup: JID first, then phone, then suffix match
         let byJid;
         if (isGroupChat) {
@@ -1415,7 +1679,7 @@ class WhatsAppService {
           // For individual chats: match by JID, exact phone, or 10-digit suffix
           const cleanPhone = String(phone).replace(/[^0-9]/g, '');
           const phoneSuffix = cleanPhone.length >= 10 ? cleanPhone.slice(-10) : '';
-          
+
           if (phoneSuffix) {
             [byJid] = await pool.execute(
               `SELECT id, phone_number, name FROM customers WHERE whatsapp_account_id = ? AND (
@@ -1432,7 +1696,7 @@ class WhatsAppService {
             );
           }
         }
-        
+
         if (byJid.length > 0) {
           customerId = byJid[0].id;
           try {
@@ -1441,7 +1705,7 @@ class WhatsAppService {
             } else {
               await pool.execute('UPDATE customers SET whatsapp_jid = ? WHERE id = ?', [jid, customerId]);
             }
-          } catch (_) {}
+          } catch (_) { }
         } else {
           try {
             const [insCust] = await pool.execute(
@@ -1517,13 +1781,13 @@ class WhatsAppService {
       socketService.broadcastConversationUpdate({ accountId: this.accountId, userId: this.userId, synced: true, count: syncedCount });
 
       // Automatically warm up messages for ALL chats progressively in background (priority top 35 first, then remaining)
-      this.progressiveWarmupAllChats(chats).catch(() => {});
+      this.progressiveWarmupAllChats(chats).catch(() => { });
 
       return {
         success: true,
         count: syncedCount,
         totalChats: chats.length,
-        message: `Successfully synchronized ${syncedCount} chats with your WhatsApp!`
+        message: `Successfully synchronized  chats with your WhatsApp!`
       };
     } catch (err) {
       console.error(`[WhatsApp:Account ${this.accountId}] Sync chats error:`, err);
@@ -1696,7 +1960,7 @@ class WhatsAppService {
           await pool.execute('UPDATE conversations SET last_message_at = ? WHERE id = ?', [newestIso, convId]);
         }
       }
-    } catch (_) {}
+    } catch (_) { }
   }
 
   async syncWhatsAppCallsFromBrowser() {
@@ -1926,7 +2190,7 @@ class WhatsAppService {
                   const msgsAfter = chat.msgs?.models?.length || 0;
                   if (msgsAfter <= msgsBefore) break;
                 }
-              } catch (_) {}
+              } catch (_) { }
             }
             const chatJid = chat.id?._serialized || (typeof chat.id === 'string' ? chat.id : '');
             const chatMsgs = chat.msgs?.models || [];
@@ -1949,7 +2213,7 @@ class WhatsAppService {
             return conn?.wid?.user || conn?.me?.user || null;
           });
           if (pUser) this.botPhone = String(pUser).replace(/[^0-9]/g, '');
-        } catch (_) {}
+        } catch (_) { }
       }
 
       const activeProcessedIds = [];
@@ -1985,7 +2249,7 @@ class WhatsAppService {
                 customerName = contact.name || contact.pushname;
               }
             }
-          } catch (_) {}
+          } catch (_) { }
 
           let tsSeconds = typeof c.timestamp === 'number' ? c.timestamp : parseInt(c.timestamp, 10);
           if (tsSeconds > 1e11) {
@@ -2118,7 +2382,7 @@ class WhatsAppService {
              duration = COALESCE(VALUES(duration), whatsapp_calls.duration)`,
           [this.accountId]
         );
-      } catch (_) {}
+      } catch (_) { }
 
       try {
         await pool.execute(
@@ -2131,7 +2395,7 @@ class WhatsAppService {
            WHERE (wc.customer_name IS NULL OR wc.customer_name = '' OR LOWER(wc.customer_name) = 'vaishnavi' OR wc.customer_name = wc.phone_number)
              AND c.name IS NOT NULL AND c.name != ''`
         );
-      } catch (_) {}
+      } catch (_) { }
 
       const queryParams = phoneForQuery
         ? [this.accountId, phoneForQuery]
@@ -2169,7 +2433,7 @@ class WhatsAppService {
         if (r.rawCall) {
           try {
             rawCall = typeof r.rawCall === 'string' ? JSON.parse(r.rawCall) : r.rawCall;
-          } catch (_) {}
+          } catch (_) { }
         }
         if (!rawCall) {
           rawCall = {
@@ -2317,7 +2581,7 @@ class WhatsAppService {
         if (cust.length > 0 && cust[0].name) {
           customerName = cust[0].name;
         }
-      } catch (_) {}
+      } catch (_) { }
 
       const safeCallId = `call_manual_${Date.now()}`;
       const rawCallJson = JSON.stringify({

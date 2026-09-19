@@ -163,6 +163,27 @@ class WhatsAppSessionManager {
   }
 
   /**
+   * Automatically restore sessions for accounts marked online or configured
+   */
+  async autoRestoreSessions() {
+    try {
+      const [rows] = await pool.execute(
+        "SELECT * FROM whatsapp_accounts WHERE status = 'online' OR phone_number IS NOT NULL"
+      );
+      if (rows.length > 0) {
+        console.log(`[SessionManager] Auto-restoring ${rows.length} active WhatsApp session(s)...`);
+        for (const account of rows) {
+          this.getOrCreateSession(account.id, account).catch((err) => {
+            console.warn(`[SessionManager] Auto-restore error for Account ${account.id}:`, err.message);
+          });
+        }
+      }
+    } catch (err) {
+      console.warn('[SessionManager] Auto-restore query failed:', err.message);
+    }
+  }
+
+  /**
    * Destroy all active sessions on server shutdown
    */
   async destroyAll() {

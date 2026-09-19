@@ -157,6 +157,16 @@ function broadcastWhatsAppSyncStatus(syncData) {
   ioInstance.emit('whatsapp_sync_status', syncData);
 }
 
+function broadcastMessageStatusUpdate(conversationId, messageId, status, whatsappMessageId = null, accountId = null) {
+  if (!ioInstance) return;
+  const payload = { conversationId, messageId, status, whatsappMessageId, accountId };
+  if (accountId) {
+    ioInstance.to(`whatsapp_account_${accountId}`).emit('message_status_updated', payload);
+  }
+  ioInstance.to(`conv_${conversationId}`).emit('message_status_updated', payload);
+  ioInstance.emit('message_status_updated', payload);
+}
+
 module.exports = {
   initSocket,
   getIO,
@@ -166,5 +176,6 @@ module.exports = {
   broadcastWhatsAppQR,
   broadcastWhatsAppSyncStatus,
   broadcastInternalMessage,
+  broadcastMessageStatusUpdate,
   getInternalRoom
 };

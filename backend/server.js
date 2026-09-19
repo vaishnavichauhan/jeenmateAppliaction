@@ -21,8 +21,8 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization', 'x-whatsapp-account-id']
 }));
 
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 // Serve static uploaded files (chat images, etc.)
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
@@ -75,6 +75,7 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`💬 QR Web Page:     http://localhost:${PORT}/api/whatsapp/qr-page`);
   console.log(`🔑 Default Admin:    admin@support.com / Admin@12345`);
   console.log('====================================================');
+  sessionManager.autoRestoreSessions().catch(() => {});
 });
 
 // Graceful shutdown

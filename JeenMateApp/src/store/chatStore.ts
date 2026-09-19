@@ -2,6 +2,9 @@ import { create } from 'zustand';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import apiClient from '../services/api';
 import { getSocket } from '../services/socket';
+import { useAuthStore } from './authStore';
+
+const STORAGE_KEY_CONVS = '@jeenmate_conversations_cache_v2';
 
 export interface CallMetadata {
   isCall?: boolean;
@@ -24,7 +27,7 @@ export interface ChatMessage {
   text: string;
   timestamp: string;
   whatsapp_timestamp?: number | null;
-  status: 'sent' | 'delivered' | 'read' | 'pending' | 'failed';
+  status: 'sent' | 'delivered' | 'read' | 'pending' | 'sending' | 'failed';
   whatsapp_message_id?: string | null;
   message_type?: string;
   metadata?: CallMetadata | null;
@@ -43,6 +46,19 @@ export interface Conversation {
 }
 
 export type WhatsAppSyncStatus = 'idle' | 'initializing' | 'syncing' | 'ready' | 'error';
+
+export interface SendMediaPayload {
+  mediaType?: 'image' | 'video' | 'document';
+  uri?: string;
+  base64?: string;
+  type?: string;
+  fileName?: string;
+  fileSize?: number;
+  duration?: number;
+  caption?: string;
+}
+
+export type SendImagePayload = SendMediaPayload;
 
 interface ChatState {
   conversations: Conversation[];
@@ -64,7 +80,7 @@ interface ChatState {
   fetchConversations: (accountId?: number) => Promise<void>;
   fetchMessages: (conversationId: string) => Promise<void>;
   fetchOlderMessages: (conversationId: string) => Promise<number>;
-  sendMessage: (conversationId: string, text: string) => Promise<boolean>;
+  sendMessage: (conversationId: string, text: string, mediaPayload?: SendMediaPayload) => Promise<boolean>;
   setActiveConversation: (conversation: Conversation | null) => void;
   setSearchQuery: (query: string) => void;
   setSyncStatus: (status: WhatsAppSyncStatus) => void;
@@ -72,7 +88,24 @@ interface ChatState {
   setupSocketListeners: () => void;
 }
 
-const STORAGE_KEY_CONVS = '@jeenmate_conversations_cache_v2';
+export const resolveMediaUrl = (url?: string | null): string | null => {
+  if (!url || typeof url !== 'string') return null;
+  const trimmed = url.trim();
+  if (!trimmed) return null;
+  if (
+    trimmed.startsWith('http://') ||
+    trimmed.startsWith('https://') ||
+    trimmed.startsWith('data:') ||
+    trimmed.startsWith('file://') ||
+    trimmed.startsWith('content://')
+  ) {
+    return trimmed;
+  }
+  const { serverUrl } = useAuthStore.getState();
+  const cleanBase = (serverUrl || '').replace(/\/+$/, '');
+  const cleanPath = trimmed.startsWith('/') ? trimmed : `/${trimmed}`;
+  return cleanBase ? `${cleanBase}${cleanPath}` : trimmed;
+};
 
 export const parseTime = (t?: string | number): number => {
   if (!t) return 0;
@@ -98,8 +131,74 @@ export const getMessageTime = (m: ChatMessage): number => {
   return parseTime(m.timestamp);
 };
 
-export const sortMessages = (msgs: ChatMessage[]): ChatMessage[] => {
-  return [...msgs].sort((a, b) => {
+export const deduplicateMessages = (rawMsgs: ChatMessage[]): ChatMessage[] => {
+  const seenIds = new Set<string>();
+  const seenWaIds = new Set<string>();
+  const uniqueMsgs: ChatMessage[] = [];
+
+  for (const m of rawMsgs) {
+    if (!m.id) continue;
+    if (seenIds.has(String(m.id))) continue;
+    if (m.whatsapp_message_id && seenWaIds.has(m.whatsapp_message_id)) continue;
+
+    const mTime = getMessageTime(m);
+    const mIsImage = m.message_type === 'image' || !!m.metadata?.isImage || !!m.metadata?.mediaUrl || (m.text && (m.text.startsWith('data:image') || m.text.startsWith('/9j/') || m.text === 'Images' || m.text === '📷 Photo' || m.text === 'Image'));
+
+    // Check for duplicate image within 15 seconds from same sender
+    if (mIsImage) {
+      const existingImgIdx = uniqueMsgs.findIndex(
+        (prev) => {
+          const prevTime = getMessageTime(prev);
+          const prevIsImage = prev.message_type === 'image' || !!prev.metadata?.isImage || !!prev.metadata?.mediaUrl || (prev.text && (prev.text.startsWith('data:image') || prev.text.startsWith('/9j/') || prev.text === 'Images' || prev.text === '📷 Photo' || prev.text === 'Image'));
+          return prevIsImage && prev.sender === m.sender && Math.abs(prevTime - mTime) < 15000;
+        }
+      );
+
+      if (existingImgIdx >= 0) {
+        const existing = uniqueMsgs[existingImgIdx];
+        const existingUrl = existing.metadata?.mediaUrl || (existing.text && existing.text.startsWith('data:image') ? existing.text : '');
+        const currentUrl = m.metadata?.mediaUrl || (m.text && m.text.startsWith('data:image') ? m.text : '');
+
+        const existingHasFullMedia = existingUrl && !existingUrl.includes('/9j/') && existingUrl.length > 5000;
+        const newHasFullMedia = currentUrl && !currentUrl.includes('/9j/') && currentUrl.length > 5000;
+
+        // Keep the version with the sharp high-resolution media
+        if (newHasFullMedia || !existingHasFullMedia) {
+          uniqueMsgs[existingImgIdx] = {
+            ...existing,
+            ...m,
+            metadata: {
+              ...(existing.metadata || {}),
+              ...(m.metadata || {}),
+              mediaUrl: currentUrl || existingUrl || null
+            }
+          };
+        }
+        seenIds.add(String(m.id));
+        if (m.whatsapp_message_id) seenWaIds.add(m.whatsapp_message_id);
+        continue;
+      }
+    }
+
+    // Check if this is an outgoing duplicate of an already added outgoing message with same text within 5 seconds
+    if (m.sender === 'staff' && m.text) {
+      const isDuplicateStaff = uniqueMsgs.some(
+        (prev) =>
+          prev.sender === 'staff' &&
+          prev.text === m.text &&
+          Math.abs(getMessageTime(prev) - mTime) < 5000
+      );
+      if (isDuplicateStaff) {
+        continue;
+      }
+    }
+
+    seenIds.add(String(m.id));
+    if (m.whatsapp_message_id) seenWaIds.add(m.whatsapp_message_id);
+    uniqueMsgs.push(m);
+  }
+
+  return [...uniqueMsgs].sort((a, b) => {
     const timeA = getMessageTime(a);
     const timeB = getMessageTime(b);
     if (timeA !== timeB) return timeA - timeB;
@@ -107,6 +206,10 @@ export const sortMessages = (msgs: ChatMessage[]): ChatMessage[] => {
     const idB = typeof b.id === 'number' ? b.id : parseInt(String(b.id), 10) || 0;
     return idA - idB;
   });
+};
+
+export const sortMessages = (msgs: ChatMessage[]): ChatMessage[] => {
+  return deduplicateMessages(msgs);
 };
 
 export const deduplicateConversations = (convs: Conversation[]): Conversation[] => {
@@ -405,28 +508,49 @@ export const useChatStore = create<ChatState>((set, get) => ({
     return 0;
   },
 
-  sendMessage: async (conversationId: string, text: string) => {
-    if (!text.trim()) return false;
+  sendMessage: async (conversationId: string, text: string, mediaPayload?: SendMediaPayload) => {
+    const trimmedText = (text || '').trim();
+    if (!trimmedText && !mediaPayload) return false;
     set({ isSending: true });
 
     const localMsgId = `msg_staff_${Date.now()}`;
     const timestamp = new Date().toISOString();
+    const isMedia = Boolean(mediaPayload);
+    const mediaType = mediaPayload?.mediaType || (mediaPayload ? 'image' : 'text');
+
+    let defaultPlaceholder = '📷 Photo';
+    if (mediaType === 'video') defaultPlaceholder = '🎥 Video';
+    else if (mediaType === 'document') defaultPlaceholder = mediaPayload?.fileName || '📄 Document';
+
+    const displayText = isMedia ? (trimmedText || mediaPayload?.caption || defaultPlaceholder) : trimmedText;
 
     const optimisticMessage: ChatMessage = {
       id: localMsgId,
       conversation_id: conversationId,
       sender: 'staff',
-      text: text.trim(),
+      text: displayText,
       timestamp,
       whatsapp_timestamp: Date.now(),
-      status: 'sent',
+      status: 'sending',
+      message_type: isMedia ? mediaType : 'text',
+      metadata: isMedia ? ({
+        isImage: mediaType === 'image',
+        isVideo: mediaType === 'video',
+        isDocument: mediaType === 'document',
+        mediaUrl: mediaPayload?.uri || (mediaPayload?.base64 ? `data:${mediaPayload.type || 'image/jpeg'};base64,${mediaPayload.base64}` : ''),
+        filename: mediaPayload?.fileName,
+        fileSize: mediaPayload?.fileSize,
+        duration: mediaPayload?.duration,
+        mimetype: mediaPayload?.type,
+        caption: trimmedText || mediaPayload?.caption || '',
+      } as any) : undefined,
     };
 
     // Optimistic UI update — add message & push conversation to top of list
     set((state) => {
       const updatedMessages = sortMessages([...state.messages, optimisticMessage]);
       const updatedConvs = state.conversations.map((c) =>
-        c.id === conversationId ? { ...c, last_message: text.trim(), last_message_at: timestamp } : c
+        c.id === conversationId ? { ...c, last_message: displayText, last_message_at: timestamp } : c
       );
       return {
         messages: updatedMessages,
@@ -435,19 +559,78 @@ export const useChatStore = create<ChatState>((set, get) => ({
     });
 
     try {
-      const res = await apiClient.post(`/api/conversations/${conversationId}/messages`, {
-        text: text.trim(),
-      });
+      let res;
+      // If we have a local file uri on device, use FormData multipart for maximum reliability and low memory
+      if (mediaPayload && mediaPayload.uri && (mediaPayload.uri.startsWith('file://') || mediaPayload.uri.startsWith('content://') || mediaPayload.uri.startsWith('/'))) {
+        const formData = new FormData();
+        if (trimmedText) formData.append('text', trimmedText);
+        if (mediaPayload.caption || trimmedText) formData.append('caption', mediaPayload.caption || trimmedText);
+        formData.append('mediaType', mediaType);
+        if (mediaPayload.fileName) formData.append('filename', mediaPayload.fileName);
+        if (mediaPayload.fileSize) formData.append('fileSize', String(mediaPayload.fileSize));
+        if (mediaPayload.duration) formData.append('duration', String(mediaPayload.duration));
+        if (mediaPayload.type) formData.append('mimetype', mediaPayload.type);
+
+        const fileObj = {
+          uri: mediaPayload.uri,
+          type: mediaPayload.type || (mediaType === 'video' ? 'video/mp4' : (mediaType === 'document' ? 'application/pdf' : 'image/jpeg')),
+          name: mediaPayload.fileName || (mediaType === 'video' ? 'video.mp4' : (mediaType === 'document' ? 'document.pdf' : 'image.jpg')),
+        };
+        formData.append('file', fileObj as any);
+
+        res = await apiClient.post(`/api/conversations/${conversationId}/messages`, formData);
+      } else {
+        // Fallback to JSON payload
+        const payload: any = {
+          text: trimmedText,
+        };
+
+        if (mediaPayload) {
+          const rawB64 = mediaPayload.base64 || '';
+          const dataUrl = rawB64 ? (rawB64.startsWith('data:') ? rawB64 : `data:${mediaPayload.type || 'image/jpeg'};base64,${rawB64}`) : mediaPayload.uri;
+          if (mediaType === 'image') payload.image = dataUrl;
+          else if (mediaType === 'video') payload.video = dataUrl;
+          else if (mediaType === 'document') payload.document = dataUrl;
+          else payload.file = dataUrl;
+
+          payload.mediaType = mediaType;
+          payload.caption = trimmedText || mediaPayload.caption;
+          payload.mimetype = mediaPayload.type || (mediaType === 'video' ? 'video/mp4' : (mediaType === 'document' ? 'application/pdf' : 'image/jpeg'));
+          payload.filename = mediaPayload.fileName || (mediaType === 'video' ? 'video.mp4' : (mediaType === 'document' ? 'document.pdf' : 'photo.jpg'));
+          if (mediaPayload.fileSize) payload.fileSize = mediaPayload.fileSize;
+          if (mediaPayload.duration) payload.duration = mediaPayload.duration;
+        }
+
+        res = await apiClient.post(`/api/conversations/${conversationId}/messages`, payload);
+      }
 
       if (res.data && res.data.success) {
         const saved = res.data.data;
         set((state) => ({
-          messages: sortMessages(state.messages.map((m) => (m.id === localMsgId ? saved : m))),
+          messages: sortMessages(
+            state.messages.map((m) => {
+              if (m.id === localMsgId) {
+                const optMeta = typeof optimisticMessage.metadata === 'string' ? JSON.parse(optimisticMessage.metadata) : (optimisticMessage.metadata || {});
+                const savedMeta = typeof saved.metadata === 'string' ? JSON.parse(saved.metadata) : (saved.metadata || {});
+                const mergedMeta = {
+                  ...optMeta,
+                  ...savedMeta,
+                  mediaUrl: savedMeta.mediaUrl || optMeta.mediaUrl || null,
+                };
+                return {
+                  ...optimisticMessage,
+                  ...saved,
+                  metadata: mergedMeta,
+                };
+              }
+              return m;
+            })
+          ),
         }));
       }
       return true;
-    } catch (e) {
-      console.warn('[ChatStore] Message sent locally (offline)');
+    } catch (e: any) {
+      console.warn('[ChatStore] Message send error:', e?.response?.data || e?.message || e);
       return true;
     } finally {
       set({ isSending: false });
@@ -523,9 +706,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
           let updated: ChatMessage[];
           if (existingIdx >= 0) {
-            // Replace existing or optimistic version
+            // Replace existing or optimistic version, preserving mediaUrl if already present
+            const prev = state.messages[existingIdx];
+            const prevMeta = typeof prev.metadata === 'string' ? JSON.parse(prev.metadata) : (prev.metadata || {});
+            const rawMeta = typeof rawMsg.metadata === 'string' ? JSON.parse(rawMsg.metadata) : (rawMsg.metadata || {});
+            const mergedMeta = {
+              ...prevMeta,
+              ...rawMeta,
+              mediaUrl: rawMeta.mediaUrl || prevMeta.mediaUrl || null,
+            };
             updated = [...state.messages];
-            updated[existingIdx] = rawMsg;
+            updated[existingIdx] = {
+              ...prev,
+              ...rawMsg,
+              metadata: mergedMeta,
+            };
           } else {
             updated = [...state.messages, rawMsg];
           }
@@ -595,6 +790,25 @@ export const useChatStore = create<ChatState>((set, get) => ({
       if (statusData?.status) {
         set({ whatsappStatus: statusData.status });
       }
+    });
+
+    // 4. Message Status Updated Listener (sending -> sent / failed)
+    socket.off('message_status_updated');
+    socket.on('message_status_updated', (payload: { conversationId: string; messageId: number | string; status: 'sending' | 'sent' | 'failed'; whatsappMessageId?: string }) => {
+      if (!payload || !payload.messageId) return;
+      set((state) => {
+        const updatedMsgs = state.messages.map((m) => {
+          if (String(m.id) === String(payload.messageId)) {
+            return {
+              ...m,
+              status: payload.status,
+              whatsapp_message_id: payload.whatsappMessageId || m.whatsapp_message_id,
+            };
+          }
+          return m;
+        });
+        return { messages: updatedMsgs };
+      });
     });
 
     set({ isSocketListening: true });

@@ -20,19 +20,23 @@ export interface InternalChatMessage {
   receiver_id: number;
   message_text: string;
   media_urls?: string[] | null;
-  message_type?: 'text' | 'image' | 'media';
+  message_type?: 'text' | 'image' | 'video' | 'document' | 'media';
   is_read: number;
   created_at: string;
   sender_name?: string;
   receiver_name?: string;
 }
 
-export interface SelectedImage {
+export interface SelectedMedia {
   uri: string;
   fileName?: string;
   type?: string;
   fileSize?: number;
+  duration?: number;
+  mediaType?: 'image' | 'video' | 'document';
 }
+
+export type SelectedImage = SelectedMedia;
 
 interface InternalChatState {
   colleagues: Colleague[];
@@ -46,7 +50,7 @@ interface InternalChatState {
 
   fetchColleagues: () => Promise<void>;
   fetchMessages: (colleagueId: number) => Promise<void>;
-  sendMessage: (receiverId: number, text?: string, images?: SelectedImage[]) => Promise<boolean>;
+  sendMessage: (receiverId: number, text?: string, mediaFiles?: SelectedMedia[]) => Promise<boolean>;
   setActiveColleague: (colleague: Colleague | null) => void;
   sendTypingIndicator: (receiverId: number, isTyping: boolean) => void;
   setupSocketListeners: () => void;
@@ -98,31 +102,45 @@ export const useInternalChatStore = create<InternalChatState>((set, get) => ({
     }
   },
 
-  sendMessage: async (receiverId: number, text?: string, images?: SelectedImage[]) => {
+  sendMessage: async (receiverId: number, text?: string, mediaFiles?: SelectedMedia[]) => {
     const trimmed = (text || '').trim();
-    const hasImages = images && images.length > 0;
+    const hasMedia = mediaFiles && mediaFiles.length > 0;
 
-    if (!trimmed && !hasImages) return false;
+    if (!trimmed && !hasMedia) return false;
 
     set({ isSending: true });
     try {
       let resData: any = null;
-      if (hasImages) {
+      if (hasMedia) {
         const formData = new FormData();
         formData.append('receiver_id', String(receiverId));
         if (trimmed) {
           formData.append('message_text', trimmed);
         }
 
-        images.forEach((img, idx) => {
-          let uri = img.uri;
+        mediaFiles.forEach((file, idx) => {
+          let uri = file.uri;
           if (Platform.OS === 'ios') {
             uri = uri.replace('file://', '');
           }
+          const defaultName =
+            file.mediaType === 'video'
+              ? `video_${Date.now()}_${idx}.mp4`
+              : file.mediaType === 'document'
+              ? `doc_${Date.now()}_${idx}.pdf`
+              : `image_${Date.now()}_${idx}.jpg`;
+
+          const defaultType =
+            file.mediaType === 'video'
+              ? 'video/mp4'
+              : file.mediaType === 'document'
+              ? 'application/pdf'
+              : 'image/jpeg';
+
           formData.append('images', {
             uri,
-            name: img.fileName || `image_${Date.now()}_${idx}.jpg`,
-            type: img.type || 'image/jpeg',
+            name: file.fileName || defaultName,
+            type: file.type || defaultType,
           } as any);
         });
 
@@ -130,7 +148,7 @@ export const useInternalChatStore = create<InternalChatState>((set, get) => ({
         const base = (serverUrl || (Platform.OS === 'android' ? 'http://192.168.1.3:5001' : 'http://localhost:5001')).replace(/\/+$/, '');
         const targetEndpoint = `${base}/api/internal-chat/messages`;
 
-        console.log('[InternalChatStore] Sending images to:', targetEndpoint, 'count:', images.length);
+        console.log('[InternalChatStore] Sending media to:', targetEndpoint, 'count:', mediaFiles.length);
         const uploadRes = await fetch(targetEndpoint, {
           method: 'POST',
           headers: {
@@ -151,11 +169,15 @@ export const useInternalChatStore = create<InternalChatState>((set, get) => ({
 
       if (resData?.success && resData.data) {
         const newMsg: InternalChatMessage = resData.data;
+        let defaultMediaBadge = '📷 Photo';
+        if (mediaFiles && mediaFiles.some((m) => m.mediaType === 'video')) defaultMediaBadge = '🎥 Video';
+        else if (mediaFiles && mediaFiles.some((m) => m.mediaType === 'document')) defaultMediaBadge = '📄 Document';
+
         const summaryText =
           trimmed ||
           (newMsg.media_urls && newMsg.media_urls.length > 1
-            ? `📷 ${newMsg.media_urls.length} Photos`
-            : '📷 Photo');
+            ? `${defaultMediaBadge} (${newMsg.media_urls.length})`
+            : defaultMediaBadge);
 
         set((state) => {
           // Avoid duplicate if socket already added it

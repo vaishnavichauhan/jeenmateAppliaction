@@ -53,29 +53,31 @@ const Message = {
       }
 
       const [rows] = await pool.execute(
-        `SELECT * FROM (
-          SELECT 
-            id,
-            conversation_id,
-            CASE WHEN direction = 'outgoing' THEN 'staff' ELSE 'customer' END as sender,
-            message as text,
-            DATE_FORMAT(CONVERT_TZ(created_at, @@session.time_zone, '+00:00'), '%Y-%m-%dT%H:%i:%s.000Z') as timestamp,
-            whatsapp_timestamp,
-            status,
-            whatsapp_message_id,
-            message_type,
-            metadata,
-            created_at
-          FROM messages
-          WHERE conversation_id = ?
-            AND (
-              (${beforeEpoch} > 0 AND whatsapp_timestamp IS NOT NULL AND whatsapp_timestamp < ${beforeEpoch})
-              OR (whatsapp_timestamp IS NULL AND created_at < ?)
-            )
-          ORDER BY COALESCE(whatsapp_timestamp, UNIX_TIMESTAMP(created_at) * 1000) DESC, id DESC
-          LIMIT ${parsedLimit}
-        ) sub
-        ORDER BY COALESCE(whatsapp_timestamp, UNIX_TIMESTAMP(created_at) * 1000) ASC, id ASC`,
+        `SELECT 
+           m.id,
+           m.conversation_id,
+           CASE WHEN m.direction = 'outgoing' THEN 'staff' ELSE 'customer' END as sender,
+           m.message as text,
+           DATE_FORMAT(CONVERT_TZ(m.created_at, @@session.time_zone, '+00:00'), '%Y-%m-%dT%H:%i:%s.000Z') as timestamp,
+           m.whatsapp_timestamp,
+           m.status,
+           m.whatsapp_message_id,
+           m.message_type,
+           m.metadata,
+           m.created_at
+         FROM (
+           SELECT id, COALESCE(whatsapp_timestamp, UNIX_TIMESTAMP(created_at) * 1000) as sort_time
+           FROM messages
+           WHERE conversation_id = ?
+             AND (
+               (${beforeEpoch} > 0 AND whatsapp_timestamp IS NOT NULL AND whatsapp_timestamp < ${beforeEpoch})
+               OR (whatsapp_timestamp IS NULL AND created_at < ?)
+             )
+           ORDER BY COALESCE(whatsapp_timestamp, UNIX_TIMESTAMP(created_at) * 1000) DESC, id DESC
+           LIMIT ${parsedLimit}
+         ) ids
+         JOIN messages m ON m.id = ids.id
+         ORDER BY ids.sort_time ASC, m.id ASC`,
         [conversationId, safeBefore]
       );
 
@@ -84,15 +86,16 @@ const Message = {
         const oldestWaTime = rows[0].whatsapp_timestamp;
         const oldestCreated = rows[0].created_at;
         const [olderCount] = await pool.execute(
-          `SELECT COUNT(*) as cnt FROM messages 
+          `SELECT id FROM messages 
            WHERE conversation_id = ? 
              AND (
                (? IS NOT NULL AND whatsapp_timestamp < ?)
                OR (whatsapp_timestamp IS NULL AND created_at < ?)
-             )`,
+             )
+           LIMIT 1`,
           [conversationId, oldestWaTime, oldestWaTime, oldestCreated]
         );
-        hasMore = (olderCount[0]?.cnt || 0) > 0;
+        hasMore = (olderCount.length || 0) > 0;
       }
 
       return {
@@ -104,25 +107,27 @@ const Message = {
 
     // Case 2: Initial load or default — fetch the latest `parsedLimit` messages
     const [rows] = await pool.execute(
-      `SELECT * FROM (
-        SELECT 
-          id,
-          conversation_id,
-          CASE WHEN direction = 'outgoing' THEN 'staff' ELSE 'customer' END as sender,
-          message as text,
-          DATE_FORMAT(CONVERT_TZ(created_at, @@session.time_zone, '+00:00'), '%Y-%m-%dT%H:%i:%s.000Z') as timestamp,
-          whatsapp_timestamp,
-          status,
-          whatsapp_message_id,
-          message_type,
-          metadata,
-          created_at
-        FROM messages
-        WHERE conversation_id = ?
-        ORDER BY COALESCE(whatsapp_timestamp, UNIX_TIMESTAMP(created_at) * 1000) DESC, id DESC
-        LIMIT ${parsedLimit}
-      ) sub
-      ORDER BY COALESCE(whatsapp_timestamp, UNIX_TIMESTAMP(created_at) * 1000) ASC, id ASC`,
+      `SELECT 
+         m.id,
+         m.conversation_id,
+         CASE WHEN m.direction = 'outgoing' THEN 'staff' ELSE 'customer' END as sender,
+         m.message as text,
+         DATE_FORMAT(CONVERT_TZ(m.created_at, @@session.time_zone, '+00:00'), '%Y-%m-%dT%H:%i:%s.000Z') as timestamp,
+         m.whatsapp_timestamp,
+         m.status,
+         m.whatsapp_message_id,
+         m.message_type,
+         m.metadata,
+         m.created_at
+       FROM (
+         SELECT id, COALESCE(whatsapp_timestamp, UNIX_TIMESTAMP(created_at) * 1000) as sort_time
+         FROM messages
+         WHERE conversation_id = ?
+         ORDER BY COALESCE(whatsapp_timestamp, UNIX_TIMESTAMP(created_at) * 1000) DESC, id DESC
+         LIMIT ${parsedLimit}
+       ) ids
+       JOIN messages m ON m.id = ids.id
+       ORDER BY ids.sort_time ASC, m.id ASC`,
       [conversationId]
     );
 
@@ -131,15 +136,16 @@ const Message = {
       const oldestWaTime = rows[0].whatsapp_timestamp;
       const oldestCreated = rows[0].created_at;
       const [olderCount] = await pool.execute(
-        `SELECT COUNT(*) as cnt FROM messages 
+        `SELECT id FROM messages 
          WHERE conversation_id = ? 
            AND (
              (? IS NOT NULL AND whatsapp_timestamp < ?)
              OR (whatsapp_timestamp IS NULL AND created_at < ?)
-           )`,
+           )
+         LIMIT 1`,
         [conversationId, oldestWaTime, oldestWaTime, oldestCreated]
       );
-      hasMore = (olderCount[0]?.cnt || 0) > 0;
+      hasMore = (olderCount.length || 0) > 0;
     }
 
     return {

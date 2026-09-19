@@ -20,10 +20,22 @@ const storage = multer.diskStorage({
 });
 
 const fileFilter = (req, file, cb) => {
-  if (file.mimetype.startsWith('image/')) {
+  const mime = (file.mimetype || '').toLowerCase();
+  const ext = path.extname(file.originalname || '').toLowerCase();
+
+  const isImage = mime.startsWith('image/') || ext.match(/\.(jpg|jpeg|png|webp|gif)$/i);
+  const isVideo = mime.startsWith('video/') || ext.match(/\.(mp4|mov|3gp|mkv)$/i);
+  const isDoc =
+    mime.includes('pdf') ||
+    mime.includes('word') ||
+    mime.includes('officedocument') ||
+    mime.includes('msword') ||
+    ext.match(/\.(pdf|doc|docx)$/i);
+
+  if (isImage || isVideo || isDoc) {
     cb(null, true);
   } else {
-    cb(new Error('Only image files are allowed!'), false);
+    cb(new Error('Only image, video, PDF, or Word document files are allowed!'), false);
   }
 };
 
@@ -31,8 +43,8 @@ const uploadInternalChatImages = multer({
   storage,
   fileFilter,
   limits: {
-    files: 5, // Max 5 images
-    fileSize: 15 * 1024 * 1024 // 15MB max per image
+    files: 5, // Max 5 media files
+    fileSize: 50 * 1024 * 1024 // 50MB max
   }
 });
 
