@@ -9,7 +9,6 @@ import {
   KeyboardAvoidingView,
   Platform,
   ActivityIndicator,
-  Modal,
   Alert,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -20,18 +19,12 @@ import { JeenMateLogo } from '../../components/common/JeenMateLogo';
 
 export const LoginScreen: React.FC = () => {
   const insets = useSafeAreaInsets();
-  const { login, serverUrl, setServerUrl, testServerConnection, isLoading, isLoginSuccess, loginError } = useAuthStore();
+  const { login, isLoading, isLoginSuccess, loginError } = useAuthStore();
 
-  const [email, setEmail] = useState('admin@support.com');
-  const [password, setPassword] = useState('Admin@12345');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [focusedField, setFocusedField] = useState<'email' | 'password' | null>(null);
-
-  // Server settings modal state
-  const [showServerModal, setShowServerModal] = useState(false);
-  const [customUrl, setCustomUrl] = useState(serverUrl);
-  const [testStatus, setTestStatus] = useState<string | null>(null);
-  const [isTesting, setIsTesting] = useState(false);
 
   const isBusy = isLoading || isLoginSuccess;
 
@@ -41,24 +34,6 @@ export const LoginScreen: React.FC = () => {
       return;
     }
     await login(email, password);
-  };
-
-  const handleTestConnection = async () => {
-    setIsTesting(true);
-    setTestStatus('Testing connection...');
-    const result = await testServerConnection(customUrl);
-    setIsTesting(false);
-    setTestStatus(result.message);
-  };
-
-  const handleSaveServerUrl = async () => {
-    if (!customUrl.trim()) {
-      Alert.alert('Invalid URL', 'Server URL cannot be empty.');
-      return;
-    }
-    await setServerUrl(customUrl);
-    setShowServerModal(false);
-    Alert.alert('Saved', `Server URL updated to:\n${customUrl}`);
   };
 
   return (
@@ -124,7 +99,7 @@ export const LoginScreen: React.FC = () => {
               </View>
               <TextInput
                 style={[styles.input, isBusy && styles.inputDisabled]}
-                placeholder="admin@support.com"
+                placeholder="Enter Your Email ID"
                 placeholderTextColor={COLORS.textSubtle}
                 keyboardType="email-address"
                 autoCapitalize="none"
@@ -157,7 +132,7 @@ export const LoginScreen: React.FC = () => {
               </View>
               <TextInput
                 style={[styles.input, { paddingRight: 48 }, isBusy && styles.inputDisabled]}
-                placeholder="Enter password"
+                placeholder="Enter Your Password"
                 placeholderTextColor={COLORS.textSubtle}
                 secureTextEntry={!showPassword}
                 autoCapitalize="none"
@@ -208,97 +183,7 @@ export const LoginScreen: React.FC = () => {
             )}
           </TouchableOpacity>
         </View>
-
-        {/* Server IP / URL Configuration Selector */}
-        {/* <View style={styles.serverConfigContainer}>
-          <View style={styles.serverInfoRow}>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.serverConfigLabel}>Backend Server</Text>
-              <Text style={styles.serverConfigUrl} numberOfLines={1}>
-                {serverUrl}
-              </Text>
-            </View>
-            <TouchableOpacity
-              style={styles.serverChangeBtn}
-              onPress={() => {
-                setCustomUrl(serverUrl);
-                setTestStatus(null);
-                setShowServerModal(true);
-              }}
-            >
-              <Text style={styles.serverChangeText}>Change IP</Text>
-            </TouchableOpacity>
-          </View>
-        </View> */}
       </ScrollView>
-
-      {/* Server URL Change Modal */}
-      <Modal
-        visible={showServerModal}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setShowServerModal(false)}
-      >
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalBox}>
-            <Text style={styles.modalTitle}>Backend Server Settings</Text>
-            <Text style={styles.modalSub}>
-              Enter your backend server host IP (e.g. your computer LAN IP like http://192.168.1.9:5001)
-            </Text>
-
-            <TextInput
-              style={styles.modalInput}
-              value={customUrl}
-              onChangeText={setCustomUrl}
-              placeholder="http://192.168.1.9:5001"
-              placeholderTextColor={COLORS.textSubtle}
-              autoCapitalize="none"
-              autoCorrect={false}
-            />
-
-            {testStatus ? (
-              <Text
-                style={[
-                  styles.testStatusText,
-                  testStatus.includes('success') || testStatus.includes('Connected')
-                    ? { color: COLORS.whatsappGreen }
-                    : { color: COLORS.accentRed },
-                ]}
-              >
-                {testStatus}
-              </Text>
-            ) : null}
-
-            <View style={styles.modalBtnRow}>
-              <TouchableOpacity
-                style={styles.modalTestBtn}
-                onPress={handleTestConnection}
-                disabled={isTesting}
-              >
-                {isTesting ? (
-                  <ActivityIndicator size="small" color={COLORS.primary} />
-                ) : (
-                  <Text style={styles.modalTestBtnText}>Test Connection</Text>
-                )}
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={styles.modalSaveBtn}
-                onPress={handleSaveServerUrl}
-              >
-                <Text style={styles.modalSaveBtnText}>Save</Text>
-              </TouchableOpacity>
-            </View>
-
-            <TouchableOpacity
-              style={styles.modalCancelBtn}
-              onPress={() => setShowServerModal(false)}
-            >
-              <Text style={styles.modalCancelBtnText}>Cancel</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-      </Modal>
     </KeyboardAvoidingView>
   );
 };

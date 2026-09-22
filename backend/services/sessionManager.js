@@ -20,9 +20,10 @@ class WhatsAppSessionManager {
    * Get an existing session for a WhatsApp Account, or create + initialize a new one.
    * @param {number} whatsappAccountId
    * @param {object} accountObj (optional)
+   * @param {object} options (optional: { autoRestore: boolean })
    * @returns {Promise<WhatsAppService>}
    */
-  async getOrCreateSession(whatsappAccountId, accountObj = null) {
+  async getOrCreateSession(whatsappAccountId, accountObj = null, options = {}) {
     const accId = Number(whatsappAccountId);
     if (this.sessions.has(accId)) {
       return this.sessions.get(accId);
@@ -45,7 +46,7 @@ class WhatsAppSessionManager {
     this.sessions.set(accId, service);
 
     // Initialize in background (non-blocking)
-    service.initialize().catch((err) => {
+    service.initialize(options).catch((err) => {
       console.error(`[SessionManager] Init error for WhatsApp Account ${accId}:`, err.message);
     });
 
@@ -63,14 +64,54 @@ class WhatsAppSessionManager {
   }
 
   /**
+   * Centralized handler when auto-restore detects that the session is no longer authenticated (emitted QR).
+   * Stops the client, marks status as disconnected (preserving phone_number), and does not generate QRs.
+   */
+  async handleAutoRestoreFailed(whatsappAccountId) {
+    const accId = Number(whatsappAccountId);
+    const service = this.sessions.get(accId);
+    if (!service) return;
+
+    this.sessions.delete(accId);
+
+    try {
+      await pool.execute(
+        'UPDATE whatsapp_accounts SET status = "disconnected" WHERE id = ?',
+        [accId]
+      );
+    } catch (_) {}
+
+    const socketService = require('./socketService');
+    socketService.broadcastWhatsAppStatus({
+      accountId: accId,
+      status: 'disconnected',
+      isConnected: false,
+      phone: service.botPhone || null,
+      name: service.botName || null
+    });
+
+    // Safely destroy Puppeteer client in background
+    setImmediate(async () => {
+      try {
+        if (service.client) {
+          await service.client.destroy().catch(() => {});
+          service.client = null;
+        }
+      } catch (e) {
+        console.warn(`[SessionManager] Auto-restore cleanup error for Account ${accId}:`, e.message);
+      }
+    });
+  }
+
+  /**
    * Disconnect or Delete a WhatsApp account session.
    * - If deleteAccount === false (Disconnect):
    *     Stops WhatsApp client, deletes session folder, clears account's WhatsApp data from DB,
-   *     sets account status to 'disconnected', clears phone_number, but PRESERVES the account & members.
+   *     sets account status to 'disconnected', clears phone_number (unless preservePhone=true), but PRESERVES the account & members.
    * - If deleteAccount === true (Delete):
    *     Stops client, deletes session folder, completely deletes the account row and its members.
    */
-  async destroySession(whatsappAccountId, { cleanData = true, deleteAccount = false } = {}) {
+  async destroySession(whatsappAccountId, { cleanData = true, deleteAccount = false, preservePhone = false } = {}) {
     const accId = Number(whatsappAccountId);
     const service = this.sessions.get(accId);
 
@@ -104,10 +145,17 @@ class WhatsAppSessionManager {
     } else {
       // Just disconnected: reset account state in DB so it can be re-linked with a new QR
       try {
-        await pool.execute(
-          'UPDATE whatsapp_accounts SET status = "disconnected", phone_number = NULL, whatsapp_name = NULL WHERE id = ?',
-          [accId]
-        );
+        if (preservePhone) {
+          await pool.execute(
+            'UPDATE whatsapp_accounts SET status = "disconnected" WHERE id = ?',
+            [accId]
+          );
+        } else {
+          await pool.execute(
+            'UPDATE whatsapp_accounts SET status = "disconnected", phone_number = NULL, whatsapp_name = NULL WHERE id = ?',
+            [accId]
+          );
+        }
       } catch (_) {}
     }
 
@@ -132,8 +180,8 @@ class WhatsAppSessionManager {
    */
   async restartSession(whatsappAccountId, clean = true) {
     const accId = Number(whatsappAccountId);
-    await this.destroySession(accId, { cleanData: clean, deleteAccount: false });
-    return this.getOrCreateSession(accId);
+    await this.destroySession(accId, { cleanData: clean, deleteAccount: false, preservePhone: true });
+    return this.getOrCreateSession(accId, null, { autoRestore: false });
   }
 
   /**
@@ -158,22 +206,22 @@ class WhatsAppSessionManager {
 
   async getQr(whatsappAccountId) {
     const accId = Number(whatsappAccountId);
-    const service = await this.getOrCreateSession(accId);
+    const service = await this.getOrCreateSession(accId, null, { autoRestore: false });
     return service.getQr();
   }
 
   /**
-   * Automatically restore sessions for accounts marked online or configured
+   * Automatically restore sessions for accounts marked online
    */
   async autoRestoreSessions() {
     try {
       const [rows] = await pool.execute(
-        "SELECT * FROM whatsapp_accounts WHERE status = 'online' OR phone_number IS NOT NULL"
+        "SELECT * FROM whatsapp_accounts WHERE status = 'online'"
       );
       if (rows.length > 0) {
         console.log(`[SessionManager] Auto-restoring ${rows.length} active WhatsApp session(s)...`);
         for (const account of rows) {
-          this.getOrCreateSession(account.id, account).catch((err) => {
+          this.getOrCreateSession(account.id, account, { autoRestore: true }).catch((err) => {
             console.warn(`[SessionManager] Auto-restore error for Account ${account.id}:`, err.message);
           });
         }

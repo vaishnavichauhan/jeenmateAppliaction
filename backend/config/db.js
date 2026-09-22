@@ -210,6 +210,15 @@ async function initDb() {
 
     // Auto-migrate legacy records: create personal accounts for existing users with data and assign whatsapp_account_id
     try {
+      await connection.execute(`
+        UPDATE whatsapp_calls wc
+        JOIN whatsapp_accounts wa ON wc.whatsapp_account_id = wa.id
+        SET wc.account_phone = wa.phone_number
+        WHERE (wc.account_phone IS NULL OR wc.account_phone = '') AND wa.phone_number IS NOT NULL
+      `);
+    } catch (_) {}
+
+    try {
       const [usersWithData] = await connection.execute(
         `SELECT DISTINCT user_id FROM conversations WHERE user_id IS NOT NULL AND (whatsapp_account_id IS NULL OR whatsapp_account_id = 0)
          UNION

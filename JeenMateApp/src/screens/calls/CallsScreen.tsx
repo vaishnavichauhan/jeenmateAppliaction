@@ -330,7 +330,7 @@ export const CallsScreen: React.FC = () => {
   const { accounts, fetchAccounts } = useWhatsAppStore();
   const personalAccounts = React.useMemo(() => {
     return accounts.filter(
-      (a) => a.account_type === 'PERSONAL' && (a.status === 'online' || a.is_connected || a.phone_number)
+      (a) => a.account_type === 'PERSONAL' && (a.status === 'online' || a.is_connected)
     );
   }, [accounts]);
   const [selectedPersonalAccount, setSelectedPersonalAccount] = useState<WhatsAppAccount | null>(null);
@@ -414,7 +414,6 @@ export const CallsScreen: React.FC = () => {
     }
 
     setIsFetchingWACalls(true);
-    setLiveWhatsAppCalls([]);
     try {
       const endpoint = `/api/whatsapp/accounts/${targetId}/call-logs`;
       const res = await apiClient.get(endpoint);
@@ -908,12 +907,12 @@ export const CallsScreen: React.FC = () => {
                   <Text style={styles.linkDeviceButtonText}>Please Link Your Device</Text>
                 </TouchableOpacity>
               </View>
-            ) : isFetchingWACalls && !isPullRefreshingWA ? (
+            ) : isFetchingWACalls && !isPullRefreshingWA && liveWhatsAppCalls.length === 0 ? (
               <View style={styles.emptyBox}>
                 <ActivityIndicator size="small" color={COLORS.primary} />
                 <Text style={styles.emptyText}>Loading WhatsApp calls...</Text>
               </View>
-            ) : waGrouped.sections.length === 0 ? (
+            ) : !isFetchingWACalls && !isPullRefreshingWA && waGrouped.sections.length === 0 ? (
               <View style={styles.emptyBox}>
                 <Text style={styles.emptyTitleText}>No Data</Text>
                 <Text style={styles.emptyText}>No WhatsApp call history recorded</Text>
@@ -956,7 +955,12 @@ export const CallsScreen: React.FC = () => {
               </View>
             )}
 
-            {phoneGrouped.sections.length === 0 ? (
+            {isSyncingCalls && realPhoneCalls.length === 0 ? (
+              <View style={styles.emptyBox}>
+                <ActivityIndicator size="small" color={COLORS.primary} />
+                <Text style={styles.emptyText}>Syncing device call logs...</Text>
+              </View>
+            ) : !isSyncingCalls && phoneGrouped.sections.length === 0 ? (
               <View style={styles.emptyBox}>
                 <Text style={styles.emptyTitleText}>No Data</Text>
                 <Text style={styles.emptyText}>No phone call history found</Text>

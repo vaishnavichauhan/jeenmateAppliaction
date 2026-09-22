@@ -345,27 +345,28 @@ export const useChatStore = create<ChatState>((set, get) => ({
   fetchMessages: async (conversationId: string) => {
     const msgCacheKey = `@jeenmate_msgs_${conversationId}`;
     
-    // 1. Load cached messages immediately if available for instant display
-    if (get().messages.length === 0) {
-      try {
-        const cached = await AsyncStorage.getItem(msgCacheKey);
-        if (cached) {
-          const parsed = JSON.parse(cached);
-          if (Array.isArray(parsed) && parsed.length > 0) {
-            set({ messages: sortMessages(parsed), isLoading: false });
-          }
+    // 1. Load cached messages specifically for THIS conversation immediately
+    let initialMsgs: ChatMessage[] = [];
+    try {
+      const cached = await AsyncStorage.getItem(msgCacheKey);
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          initialMsgs = sortMessages(parsed);
         }
-      } catch (_) {}
-    }
+      }
+    } catch (_) {}
 
-    const hasCached = get().messages.length > 0;
-    if (!hasCached) {
-      set({ isLoading: true });
-    }
+    const matchingConv = get().conversations.find((c) => String(c.id) === String(conversationId));
+    set({
+      messages: initialMsgs,
+      isLoading: initialMsgs.length === 0,
+      activeConversation: matchingConv || get().activeConversation,
+    });
 
     try {
       const res = await apiClient.get(`/api/conversations/${conversationId}/messages`, {
-        params: { limit: 30 },
+        params: { limit: 50 },
       });
       if (res.data && res.data.success) {
         const rawMsgs: ChatMessage[] = res.data.data || [];
@@ -413,7 +414,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const lastM = sortedMsgs.length > 0 ? sortedMsgs[sortedMsgs.length - 1] : null;
         set((state) => ({
           conversations: state.conversations.map((c) => {
-            if (c.id === conversationId) {
+            if (String(c.id) === String(conversationId)) {
               const updatedObj = res.data.conversation ? { ...c, ...res.data.conversation } : c;
               return {
                 ...updatedObj,
@@ -431,8 +432,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
         socket.emit('join_conversation', conversationId);
       }
     } catch (e) {
-      console.log('[ChatStore] Message fetch failed');
-      set({ messages: [], isLoading: false, hasMoreMessages: true });
+      console.log('[ChatStore] Message fetch failed for conv', conversationId);
+      set((state) => ({
+        isLoading: false,
+        hasMoreMessages: true,
+        messages: state.messages.length > 0 ? state.messages : [],
+      }));
     }
   },
 
@@ -452,7 +457,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const res = await apiClient.get(`/api/conversations/${conversationId}/messages`, {
         params: {
           before: beforeTimestamp,
-          limit: 30,
+          limit: 50,
         },
       });
 

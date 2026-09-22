@@ -22,8 +22,9 @@ import {
 import { useRoute, useNavigation } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { launchCamera, launchImageLibrary } from 'react-native-image-picker';
-import DocumentPicker, { types as docTypes } from 'react-native-document-picker';
+import { pick, types as docTypes, isErrorWithCode, errorCodes, keepLocalCopy } from '@react-native-documents/picker';
 import { useChatStore, ChatMessage, SendMediaPayload, SendImagePayload, deduplicateMessages, resolveMediaUrl } from '../../store/chatStore';
+import { useWhatsAppStore } from '../../store/whatsappStore';
 import { useTaskStore, TeamMember } from '../../store/taskStore';
 import { useAuthStore } from '../../store/authStore';
 import { COLORS, SPACING, RADIUS } from '../../constants/theme';
@@ -145,6 +146,7 @@ export const ChatDetailScreen: React.FC = () => {
     clearMessages,
   } = useChatStore();
 
+  const selectedAccount = useWhatsAppStore((s) => s.selectedAccount);
   const { addTask, teamMembers, fetchTeamMembers } = useTaskStore();
   const { user } = useAuthStore();
 
@@ -157,6 +159,46 @@ export const ChatDetailScreen: React.FC = () => {
   const flatListRef = useRef<FlatList>(null);
   const isInitialScrollDone = useRef(false);
   const isUserDragging = useRef(false);
+
+  const prevAccountStateRef = useRef<{ id: number | null; isConnected: boolean | null }>({
+    id: null,
+    isConnected: null,
+  });
+  const disconnectHandledRef = useRef(false);
+
+  // React to remote WhatsApp disconnect: show alert and navigate back to chat list
+  useEffect(() => {
+    const currentId = selectedAccount?.id ?? null;
+    const isNowConnected = !!(selectedAccount?.is_connected || selectedAccount?.status === 'online');
+
+    if (
+      prevAccountStateRef.current.id === currentId &&
+      prevAccountStateRef.current.isConnected === true &&
+      !isNowConnected &&
+      !disconnectHandledRef.current
+    ) {
+      disconnectHandledRef.current = true;
+      Alert.alert('Disconnected', 'This account disconnected.', [
+        {
+          text: 'OK',
+          onPress: () => {
+            if (navigation.canGoBack()) {
+              navigation.goBack();
+            }
+          },
+        },
+      ]);
+    }
+
+    if (isNowConnected || prevAccountStateRef.current.id !== currentId) {
+      disconnectHandledRef.current = false;
+    }
+
+    prevAccountStateRef.current = {
+      id: currentId,
+      isConnected: isNowConnected,
+    };
+  }, [selectedAccount?.is_connected, selectedAccount?.status, selectedAccount?.id, navigation]);
 
   useEffect(() => {
     const showSub = Keyboard.addListener(
@@ -293,8 +335,14 @@ export const ChatDetailScreen: React.FC = () => {
   }, [isInitialLoading, activeConvId, groupedMessages.length]);
   
   useEffect(() => {
+    useWhatsAppStore.getState().setupSocketListeners();
     return () => {
-      fetchConversations().catch(() => {});
+      useChatStore.getState().setActiveConversation(null);
+      useChatStore.getState().clearMessages();
+      const acc = useWhatsAppStore.getState().selectedAccount;
+      if (acc && (acc.status === 'online' || acc.is_connected)) {
+        fetchConversations().catch(() => {});
+      }
     };
   }, [fetchConversations]);
 
@@ -488,7 +536,7 @@ const getBase64FromUri = async (uri: string): Promise<string> => {
   const handlePickDocument = async () => {
     setAttachmentModalVisible(false);
     try {
-      const res = await DocumentPicker.pickSingle({
+      const [res] = await pick({
         type: [
           docTypes.pdf,
           docTypes.doc,
@@ -498,11 +546,22 @@ const getBase64FromUri = async (uri: string): Promise<string> => {
           'application/msword',
           'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
         ],
-        copyTo: 'cachesDirectory',
       });
 
       if (res) {
-        const fileUri = res.fileCopyUri || res.uri;
+        let fileUri = res.uri;
+        try {
+          const [localCopy] = await keepLocalCopy({
+            files: [{ uri: res.uri, fileName: res.name ?? `document_${Date.now()}.pdf` }],
+            destination: 'cachesDirectory',
+          });
+          if (localCopy?.status === 'success' && localCopy.localUri) {
+            fileUri = localCopy.localUri;
+          }
+        } catch (copyErr) {
+          console.warn('[DocumentPicker] keepLocalCopy error:', copyErr);
+        }
+
         setSelectedMedia({
           mediaType: 'document',
           uri: fileUri,
@@ -512,7 +571,7 @@ const getBase64FromUri = async (uri: string): Promise<string> => {
         });
       }
     } catch (err: any) {
-      if (DocumentPicker.isCancel(err)) {
+      if (isErrorWithCode(err) && err.code === errorCodes.OPERATION_CANCELED) {
         return;
       }
       console.warn('[Document] Error:', err);

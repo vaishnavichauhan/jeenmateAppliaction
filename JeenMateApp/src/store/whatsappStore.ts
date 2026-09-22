@@ -280,6 +280,12 @@ export const useWhatsAppStore = create<WhatsAppMultiAccountState>((set, get) => 
       if (data && data.accountId) {
         const accId = Number(data.accountId);
         const isConn = Boolean(data.isConnected ?? (data.status === 'online'));
+
+        // When the event indicates isConnected === false for the currently selected account, immediately reset chat state
+        if (!isConn && get().selectedAccountId === accId) {
+          useChatStore.getState().resetChatState().catch(() => {});
+        }
+
         set((state) => ({
           accounts: state.accounts.map((acc) =>
             acc.id === accId
@@ -287,19 +293,19 @@ export const useWhatsAppStore = create<WhatsAppMultiAccountState>((set, get) => 
                   ...acc,
                   status: data.status || (isConn ? 'online' : 'offline'),
                   is_connected: isConn,
-                  phone_number: data.phone ?? acc.phone_number,
-                  whatsapp_name: data.name ?? acc.whatsapp_name,
+                  phone_number: data.phone !== undefined ? data.phone : acc.phone_number,
+                  whatsapp_name: data.name !== undefined ? data.name : acc.whatsapp_name,
                 }
               : acc
           ),
           selectedAccount:
-            state.selectedAccountId === accId
+            state.selectedAccountId === accId && state.selectedAccount
               ? {
-                  ...state.selectedAccount!,
+                  ...state.selectedAccount,
                   status: data.status || (isConn ? 'online' : 'offline'),
                   is_connected: isConn,
-                  phone_number: data.phone ?? state.selectedAccount?.phone_number ?? null,
-                  whatsapp_name: data.name ?? state.selectedAccount?.whatsapp_name ?? null,
+                  phone_number: data.phone !== undefined ? data.phone : state.selectedAccount.phone_number,
+                  whatsapp_name: data.name !== undefined ? data.name : state.selectedAccount.whatsapp_name,
                 }
               : state.selectedAccount,
         }));

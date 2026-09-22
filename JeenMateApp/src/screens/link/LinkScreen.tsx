@@ -10,8 +10,10 @@ import {
   Alert,
   Modal,
   Platform,
+  Share,
+  Clipboard,
 } from 'react-native';
-import { useNavigation, useFocusEffect } from '@react-navigation/native';
+import { useNavigation, useFocusEffect, useIsFocused } from '@react-navigation/native';
 import { useWhatsAppStore, WhatsAppAccount } from '../../store/whatsappStore';
 import { useAuthStore } from '../../store/authStore';
 import { COLORS, SPACING, RADIUS } from '../../constants/theme';
@@ -23,6 +25,7 @@ const QR_TIMEOUT_SECONDS = 75;
 
 export const LinkScreen: React.FC = () => {
   const navigation = useNavigation<any>();
+  const isFocused = useIsFocused();
   const user = useAuthStore((s) => s.user);
   const isAdmin = user?.role === 'admin';
 
@@ -62,10 +65,14 @@ export const LinkScreen: React.FC = () => {
   const [isQrReady, setIsQrReady] = useState(false);
   const [isQrExpired, setIsQrExpired] = useState(false);
   const [qrCountdown, setQrCountdown] = useState(QR_TIMEOUT_SECONDS);
+  const [qrLinkCopied, setQrLinkCopied] = useState(false);
 
-  // Refs for timers
+  // Refs for timers & disconnect detection
   const pollTimerRef = useRef<any>(null);
   const countdownTimerRef = useRef<any>(null);
+  const prevAccountsRef = useRef<Record<number, boolean>>({});
+  const isInitialAccountsMount = useRef(true);
+  const alertedDisconnectAccountsRef = useRef<Set<number>>(new Set());
 
   // Team Access Modal
   const [showAccessModal, setShowAccessModal] = useState(false);
@@ -86,6 +93,35 @@ export const LinkScreen: React.FC = () => {
     }
   };
 
+  // Build shareable QR viewer URL (opens a browser-friendly HTML page with the QR code)
+  const getQrLink = () => {
+    const { serverUrl, token } = useAuthStore.getState();
+    if (!pendingAccountId || !token) return null;
+    return `${serverUrl}/api/whatsapp/accounts/${pendingAccountId}/qr-viewer?token=${token}`;
+  };
+
+  const handleShareQrLink = async () => {
+    const link = getQrLink();
+    if (!link) return;
+    try {
+      await Share.share({
+        message: `Scan this link to view the WhatsApp QR code:\n${link}`,
+        url: link,
+        title: 'WhatsApp QR Code Link',
+      });
+    } catch (err: any) {
+      Alert.alert('Share failed', err?.message || 'Could not share link.');
+    }
+  };
+
+  const handleCopyQrLink = () => {
+    const link = getQrLink();
+    if (!link) return;
+    Clipboard.setString(link);
+    setQrLinkCopied(true);
+    setTimeout(() => setQrLinkCopied(false), 2000);
+  };
+
   // On Focus: load accounts and setup live socket listeners
   useFocusEffect(
     useCallback(() => {
@@ -97,13 +133,59 @@ export const LinkScreen: React.FC = () => {
     }, [])
   );
 
-  // Only show connected / valid accounts on the main screen list (unscanned pending sessions remain in the modal only)
+  // Only show connected accounts on the main screen list and count
   const personalAccounts = React.useMemo(() => accounts.filter(
-    (a) => a.account_type === 'PERSONAL' && (a.status === 'online' || a.is_connected || a.phone_number)
+    (a) => a.account_type === 'PERSONAL' && (a.status === 'online' || a.is_connected)
   ), [accounts]);
   const teamAccounts = React.useMemo(() => accounts.filter(
-    (a) => a.account_type === 'TEAM' && (a.status === 'online' || a.is_connected || a.phone_number)
+    (a) => a.account_type === 'TEAM' && (a.status === 'online' || a.is_connected)
   ), [accounts]);
+
+  // Detect remote disconnect transitions and stop QR polling if scanning that account
+  useEffect(() => {
+    if (isInitialAccountsMount.current) {
+      if (accounts.length > 0) {
+        const initPrev: Record<number, boolean> = {};
+        accounts.forEach((acc) => {
+          initPrev[acc.id] = !!(acc.is_connected || acc.status === 'online');
+        });
+        prevAccountsRef.current = initPrev;
+        isInitialAccountsMount.current = false;
+      }
+      return;
+    }
+
+    const prev = prevAccountsRef.current;
+    accounts.forEach((acc) => {
+      const wasConnected = prev[acc.id] === true;
+      const isNowConnected = !!(acc.is_connected || acc.status === 'online');
+
+      // Actual transition from connected -> disconnected
+      if (wasConnected && !isNowConnected && !alertedDisconnectAccountsRef.current.has(acc.id)) {
+        alertedDisconnectAccountsRef.current.add(acc.id);
+        if (isFocused) {
+          Alert.alert('Disconnected', 'This account disconnected.');
+        }
+        if (showScanModal && pendingAccountId === acc.id) {
+          clearAllTimers();
+          setIsQrReady(false);
+          setIsQrExpired(false);
+          setIsGeneratingQr(false);
+          setQrCountdown(QR_TIMEOUT_SECONDS);
+        }
+      }
+
+      if (isNowConnected) {
+        alertedDisconnectAccountsRef.current.delete(acc.id);
+      }
+    });
+
+    const newPrev: Record<number, boolean> = {};
+    accounts.forEach((acc) => {
+      newPrev[acc.id] = !!(acc.is_connected || acc.status === 'online');
+    });
+    prevAccountsRef.current = newPrev;
+  }, [accounts, isFocused, showScanModal, pendingAccountId]);
 
   // Open Scan Modal
   const openScanModal = (type: 'PERSONAL' | 'TEAM', existingAccountId?: number) => {
@@ -111,14 +193,10 @@ export const LinkScreen: React.FC = () => {
     setScanModalType(type);
     setPendingAccountId(existingAccountId || null);
     setIsGeneratingQr(false);
-    setIsQrReady(!!existingAccountId);
+    setIsQrReady(false);
     setIsQrExpired(false);
     setQrCountdown(QR_TIMEOUT_SECONDS);
     setShowScanModal(true);
-
-    if (existingAccountId) {
-      startQrSession(existingAccountId);
-    }
   };
 
   // Start QR polling & expiration countdown for an account
@@ -131,10 +209,7 @@ export const LinkScreen: React.FC = () => {
     countdownTimerRef.current = setInterval(() => {
       setQrCountdown((prev) => {
         if (prev <= 1) {
-          clearInterval(countdownTimerRef.current);
-          countdownTimerRef.current = null;
-          clearInterval(pollTimerRef.current);
-          pollTimerRef.current = null;
+          clearAllTimers();
           setIsQrExpired(true);
           return 0;
         }
@@ -144,7 +219,9 @@ export const LinkScreen: React.FC = () => {
 
     // 2. Polling timer
     pollTimerRef.current = setInterval(async () => {
+      if (!pollTimerRef.current) return;
       const res = await fetchAccountQr(accountId);
+      if (!pollTimerRef.current) return;
       if (res.status === 'online') {
         clearAllTimers();
         await fetchAccounts();
@@ -442,7 +519,7 @@ export const LinkScreen: React.FC = () => {
                   <View style={styles.detailDivider} />
 
                   <View style={styles.detailRow}>
-                    <Text style={styles.detailLabel}>Socket Status</Text>
+                    <Text style={styles.detailLabel}>Status</Text>
                     <Text style={[styles.detailValue, { color: COLORS.whatsappGreen }]}>Online (2-way synced)</Text>
                   </View>
 
@@ -480,9 +557,14 @@ export const LinkScreen: React.FC = () => {
           </View>
         ) : (
           /* ======================================================== */
-          /* DISCONNECTED STATE (CLEAN RECONNECT / DELETE)             */
+          /* DISCONNECTED STATE (CLEAN TITLE & DISCONNECTED BADGE)    */
           /* ======================================================== */
-          <View style={styles.disconnectedCardContent}>
+          <TouchableOpacity
+            style={styles.disconnectedCardContent}
+            onPress={() => openScanModal(account.account_type, account.id)}
+            onLongPress={() => (!isTeam || isAdmin) && handleDelete(account)}
+            activeOpacity={0.7}
+          >
             <View style={styles.cardHeaderRow}>
               <View style={styles.cardHeaderLeft}>
                 <View style={[styles.statusDot, styles.dotDisconnected]} />
@@ -496,33 +578,7 @@ export const LinkScreen: React.FC = () => {
                 </Text>
               </View>
             </View>
-
-            <Text style={styles.disconnectedSubText}>
-              This WhatsApp session is disconnected. Tap below to scan a QR code or remove it.
-            </Text>
-
-            <View style={styles.disconnectedBtnRow}>
-              <TouchableOpacity
-                style={styles.reconnectBtn}
-                onPress={() => openScanModal(account.account_type, account.id)}
-                activeOpacity={0.8}
-              >
-                <Icon name="refresh" size={14} color={COLORS.primary} />
-                <Text style={styles.reconnectBtnText}>Scan QR Code</Text>
-              </TouchableOpacity>
-
-              {(!isTeam || isAdmin) && (
-                <TouchableOpacity
-                  style={styles.deleteMiniBtn}
-                  onPress={() => handleDelete(account)}
-                  activeOpacity={0.8}
-                >
-                  <Icon name="trash" size={14} color={COLORS.accentRed} />
-                  <Text style={styles.deleteMiniBtnText}>Delete</Text>
-                </TouchableOpacity>
-              )}
-            </View>
-          </View>
+          </TouchableOpacity>
         )}
       </View>
     );
@@ -761,6 +817,34 @@ export const LinkScreen: React.FC = () => {
                     <Text style={styles.countdownText}>
                       Code expires in {qrCountdown}s
                     </Text>
+                  </View>
+
+                  {/* Share & Copy Link Row */}
+                  <View style={styles.qrLinkActionRow}>
+                    <TouchableOpacity
+                      style={styles.qrLinkBtn}
+                      onPress={handleShareQrLink}
+                      activeOpacity={0.8}
+                    >
+                      <Icon name="share" size={15} color={COLORS.primary} strokeWidth={2.2} />
+                      <Text style={styles.qrLinkBtnText}>Share QR Link</Text>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                      style={[styles.qrLinkBtn, qrLinkCopied && styles.qrLinkBtnCopied]}
+                      onPress={handleCopyQrLink}
+                      activeOpacity={0.8}
+                    >
+                      <Icon
+                        name={qrLinkCopied ? 'check' : 'copy'}
+                        size={15}
+                        color={qrLinkCopied ? '#059669' : COLORS.primary}
+                        strokeWidth={2.2}
+                      />
+                      <Text style={[styles.qrLinkBtnText, qrLinkCopied && styles.qrLinkBtnTextCopied]}>
+                        {qrLinkCopied ? 'Copied!' : 'Copy Link'}
+                      </Text>
+                    </TouchableOpacity>
                   </View>
 
                   <TouchableOpacity
@@ -1154,11 +1238,8 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingBottom: SPACING.xs,
-    borderBottomWidth: 1,
-    borderBottomColor: '#F1F5F9',
-    marginBottom: SPACING.sm,
     width: '100%',
+    paddingVertical: 2,
   },
   cardHeaderLeft: {
     flexDirection: 'row',
@@ -1469,6 +1550,36 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '700',
     color: '#B45309',
+  },
+  qrLinkActionRow: {
+    flexDirection: 'row',
+    gap: 10,
+    width: '100%',
+    marginBottom: 10,
+  },
+  qrLinkBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    backgroundColor: '#EFF6FF',
+    borderWidth: 1,
+    borderColor: '#BFDBFE',
+    borderRadius: RADIUS.md,
+    paddingVertical: 10,
+  },
+  qrLinkBtnCopied: {
+    backgroundColor: '#ECFDF5',
+    borderColor: '#6EE7B7',
+  },
+  qrLinkBtnText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: COLORS.primary,
+  },
+  qrLinkBtnTextCopied: {
+    color: '#059669',
   },
   regenerateButton: {
     flexDirection: 'row',

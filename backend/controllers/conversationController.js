@@ -81,7 +81,7 @@ async function getConversations(req, res, next) {
 async function getMessages(req, res, next) {
   try {
     const { id } = req.params;
-    const { limit = 30, before, mode } = req.query;
+    const { limit = 50, before, mode } = req.query;
     const userId = req.user ? req.user.id : null;
     const userRole = req.user ? req.user.role : 'user';
 
@@ -109,7 +109,11 @@ async function getMessages(req, res, next) {
 
     // Sync latest messages for this conversation from WhatsApp Web if session is connected
     const [custRows] = await pool.execute('SELECT id, whatsapp_jid, phone_number FROM customers WHERE id = ?', [conversation.customer_id]);
-    const targetJid = custRows[0]?.whatsapp_jid || (custRows[0]?.phone_number ? `${custRows[0].phone_number.replace(/[^0-9]/g, '')}@c.us` : null);
+    const custPhone = custRows[0]?.phone_number || '';
+    const isGroupChat = custPhone.startsWith('group-') || custPhone.includes('@g.us');
+    const cleanDigits = custPhone.replace(/[^0-9]/g, '');
+    const fallbackJid = cleanDigits ? (isGroupChat ? `${cleanDigits}@g.us` : `${cleanDigits}@c.us`) : null;
+    const targetJid = custRows[0]?.whatsapp_jid || fallbackJid;
     
     let accountSession = null;
     let isTeamAccount = false;
@@ -321,7 +325,15 @@ async function getMessages(req, res, next) {
           }
 
           if (insertedCount > 0) {
-            socketService.notifyConversationUpdated({ id: conversation.id, whatsapp_account_id: accountId });
+            socketService.broadcastConversationUpdate({ id: conversation.id, whatsapp_account_id: accountId });
+            try {
+              const fresh = await Message.findByConversationId(id, { limit: 50 });
+              if (fresh.messages && fresh.messages.length > 0) {
+                for (const fm of fresh.messages.slice(-Math.min(insertedCount, 20))) {
+                  socketService.broadcastNewMessage(id, fm, accountId);
+                }
+              }
+            } catch (_) {}
           }
         } catch (liveErr) {
           console.warn('[Conversation] Live messages sync warning:', liveErr.message);
@@ -498,14 +510,8 @@ async function sendMessage(req, res, next) {
     let accountSession = null;
     if (accountId) {
       accountSession = sessionManager.getSession(accountId);
-      if (!accountSession) {
-        accountSession = await sessionManager.getOrCreateSession(accountId).catch(() => null);
-      }
     } else {
       accountSession = sessionManager.getSession(userId);
-      if (!accountSession) {
-        accountSession = await sessionManager.getOrCreateSession(userId).catch(() => null);
-      }
     }
 
     if (accountSession && accountSession.isConnected) {

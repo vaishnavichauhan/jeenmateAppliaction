@@ -37,6 +37,47 @@ const Message = {
 
     const parsedLimit = Math.max(1, Math.min(limit, 100));
 
+    let convIds = [conversationId];
+    let custIds = [];
+    try {
+      const [convRow] = await pool.execute(
+        `SELECT c.id, c.customer_id, cu.phone_number, cu.whatsapp_jid, c.whatsapp_account_id
+         FROM conversations c 
+         LEFT JOIN customers cu ON c.customer_id = cu.id 
+         WHERE c.id = ? LIMIT 1`,
+        [conversationId]
+      );
+      if (convRow.length > 0) {
+        const custId = convRow[0].customer_id;
+        if (custId) custIds.push(custId);
+        const phone = convRow[0].phone_number;
+        const jid = convRow[0].whatsapp_jid;
+        const cleanPhone = String(phone || '').replace(/[^0-9]/g, '');
+        const phoneSuffix = cleanPhone.length >= 10 ? cleanPhone.slice(-10) : '';
+
+        const [relatedConvs] = await pool.execute(
+          `SELECT c.id, c.customer_id FROM conversations c 
+           LEFT JOIN customers cu ON c.customer_id = cu.id 
+           WHERE c.id = ? OR c.customer_id = ? 
+              OR (cu.phone_number IS NOT NULL AND cu.phone_number = ?)
+              OR (cu.whatsapp_jid IS NOT NULL AND cu.whatsapp_jid = ?)
+              OR (LENGTH(?) >= 10 AND cu.phone_number LIKE CONCAT('%', ?))`,
+          [conversationId, custId || 0, phone || '', jid || '', phoneSuffix || '', phoneSuffix || '']
+        );
+        if (relatedConvs.length > 0) {
+          convIds = Array.from(new Set(relatedConvs.map(r => r.id)));
+          relatedConvs.forEach(r => {
+            if (r.customer_id) custIds.push(r.customer_id);
+          });
+          custIds = Array.from(new Set(custIds));
+        }
+      }
+    } catch (_) {}
+
+    const convPlaceholders = convIds.map(() => '?').join(',');
+    const custClause = custIds.length > 0 ? `OR customer_id IN (${custIds.map(() => '?').join(',')})` : '';
+    const matchParams = [...convIds, ...custIds];
+
     // Case 1: Fetch older messages before a specific timestamp
     if (before) {
       let beforeEpoch = 0;
@@ -68,7 +109,7 @@ const Message = {
          FROM (
            SELECT id, COALESCE(whatsapp_timestamp, UNIX_TIMESTAMP(created_at) * 1000) as sort_time
            FROM messages
-           WHERE conversation_id = ?
+           WHERE (conversation_id IN (${convPlaceholders}) ${custClause})
              AND (
                (${beforeEpoch} > 0 AND whatsapp_timestamp IS NOT NULL AND whatsapp_timestamp < ${beforeEpoch})
                OR (whatsapp_timestamp IS NULL AND created_at < ?)
@@ -78,7 +119,7 @@ const Message = {
          ) ids
          JOIN messages m ON m.id = ids.id
          ORDER BY ids.sort_time ASC, m.id ASC`,
-        [conversationId, safeBefore]
+        [...matchParams, safeBefore]
       );
 
       let hasMore = false;
@@ -87,13 +128,13 @@ const Message = {
         const oldestCreated = rows[0].created_at;
         const [olderCount] = await pool.execute(
           `SELECT id FROM messages 
-           WHERE conversation_id = ? 
+           WHERE (conversation_id IN (${convPlaceholders}) ${custClause}) 
              AND (
                (? IS NOT NULL AND whatsapp_timestamp < ?)
                OR (whatsapp_timestamp IS NULL AND created_at < ?)
              )
            LIMIT 1`,
-          [conversationId, oldestWaTime, oldestWaTime, oldestCreated]
+          [...matchParams, oldestWaTime, oldestWaTime, oldestCreated]
         );
         hasMore = (olderCount.length || 0) > 0;
       }
@@ -122,13 +163,13 @@ const Message = {
        FROM (
          SELECT id, COALESCE(whatsapp_timestamp, UNIX_TIMESTAMP(created_at) * 1000) as sort_time
          FROM messages
-         WHERE conversation_id = ?
+         WHERE (conversation_id IN (${convPlaceholders}) ${custClause})
          ORDER BY COALESCE(whatsapp_timestamp, UNIX_TIMESTAMP(created_at) * 1000) DESC, id DESC
          LIMIT ${parsedLimit}
        ) ids
        JOIN messages m ON m.id = ids.id
        ORDER BY ids.sort_time ASC, m.id ASC`,
-      [conversationId]
+      [...matchParams]
     );
 
     let hasMore = false;
@@ -137,13 +178,13 @@ const Message = {
       const oldestCreated = rows[0].created_at;
       const [olderCount] = await pool.execute(
         `SELECT id FROM messages 
-         WHERE conversation_id = ? 
+         WHERE (conversation_id IN (${convPlaceholders}) ${custClause}) 
            AND (
              (? IS NOT NULL AND whatsapp_timestamp < ?)
              OR (whatsapp_timestamp IS NULL AND created_at < ?)
            )
          LIMIT 1`,
-        [conversationId, oldestWaTime, oldestWaTime, oldestCreated]
+        [...matchParams, oldestWaTime, oldestWaTime, oldestCreated]
       );
       hasMore = (olderCount.length || 0) > 0;
     }

@@ -17,7 +17,7 @@ import {
   Keyboard,
   Dimensions,
 } from 'react-native';
-import { useNavigation, useFocusEffect } from '@react-navigation/native';
+import { useNavigation, useFocusEffect, useIsFocused } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useChatStore, Conversation, sortConversations } from '../../store/chatStore';
 import { useWhatsAppStore } from '../../store/whatsappStore';
@@ -29,6 +29,7 @@ import { Header } from '../../components/common/Header';
 
 export const ChatScreen: React.FC = () => {
   const navigation = useNavigation<any>();
+  const isFocused = useIsFocused();
   const insets = useSafeAreaInsets();
   const {
     conversations,
@@ -52,12 +53,13 @@ export const ChatScreen: React.FC = () => {
     selectedAccountId,
     fetchAccounts,
     selectAccount,
+    setupSocketListeners: setupWhatsAppSocketListeners,
   } = useWhatsAppStore();
 
   const currentAccountType = selectedAccount?.account_type || 'PERSONAL';
   const availableAccounts = React.useMemo(() => {
     return accounts.filter(
-      (a) => a.account_type === currentAccountType && (a.status === 'online' || a.is_connected || a.phone_number)
+      (a) => a.account_type === currentAccountType && (a.status === 'online' || a.is_connected)
     );
   }, [accounts, currentAccountType]);
   const [showAccountPickerModal, setShowAccountPickerModal] = useState(false);
@@ -68,14 +70,48 @@ export const ChatScreen: React.FC = () => {
   const [visibleCount, setVisibleCount] = useState(50);
   const [isInitialLoad, setIsInitialLoad] = useState(true);
 
+  const prevAccountStateRef = useRef<{ id: number | null; isConnected: boolean | null }>({
+    id: null,
+    isConnected: null,
+  });
+  const disconnectAlertedRef = useRef(false);
+
+  // Detect connected -> disconnected transition
+  useEffect(() => {
+    const currentId = selectedAccount?.id ?? null;
+    const isNowConnected = !!(selectedAccount?.is_connected || selectedAccount?.status === 'online');
+
+    if (
+      prevAccountStateRef.current.id === currentId &&
+      prevAccountStateRef.current.isConnected === true &&
+      !isNowConnected &&
+      !disconnectAlertedRef.current
+    ) {
+      disconnectAlertedRef.current = true;
+      if (isFocused) {
+        Alert.alert('Disconnected', 'This account disconnected.');
+      }
+    }
+
+    if (isNowConnected || prevAccountStateRef.current.id !== currentId) {
+      disconnectAlertedRef.current = false;
+    }
+
+    prevAccountStateRef.current = {
+      id: currentId,
+      isConnected: isNowConnected,
+    };
+  }, [selectedAccount?.is_connected, selectedAccount?.status, selectedAccount?.id, isFocused]);
+
   useEffect(() => {
     setVisibleCount(50);
   }, [searchQuery]);
 
-  // Setup socket listener once on mount
+  // Setup socket listeners once on mount
   useEffect(() => {
     setupSocketListeners();
-  }, [setupSocketListeners]);
+    setupWhatsAppSocketListeners();
+  }, [setupSocketListeners, setupWhatsAppSocketListeners]);
 
   useFocusEffect(
     useCallback(() => {
@@ -83,12 +119,10 @@ export const ChatScreen: React.FC = () => {
       setIsInitialLoad(true);
       fetchAccounts()
         .then(async () => {
-          const currentAccId = useWhatsAppStore.getState().selectedAccountId || undefined;
+          if (!isMounted) return;
           const selectedAcc = useWhatsAppStore.getState().selectedAccount;
           if (selectedAcc && (selectedAcc.status === 'online' || selectedAcc.is_connected)) {
             await syncWhatsAppChats().catch(() => {});
-          } else {
-            await fetchConversations(currentAccId);
           }
         })
         .catch(() => {})
@@ -100,7 +134,7 @@ export const ChatScreen: React.FC = () => {
       return () => {
         isMounted = false;
       };
-    }, [fetchAccounts, fetchConversations, syncWhatsAppChats])
+    }, [fetchAccounts, syncWhatsAppChats])
   );
 
   const onRefresh = async () => {

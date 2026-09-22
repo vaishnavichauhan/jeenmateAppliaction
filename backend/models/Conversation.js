@@ -37,7 +37,6 @@ const Conversation = {
         cu.whatsapp_jid as whatsapp_jid,
         cu.profile_pic_url as avatar,
         COALESCE(
-          c.last_message_preview,
           (
             SELECT 
               CASE 
@@ -59,7 +58,8 @@ const Conversation = {
             WHERE m.conversation_id = c.id
             ORDER BY COALESCE(m.whatsapp_timestamp, UNIX_TIMESTAMP(m.created_at) * 1000) DESC, m.id DESC 
             LIMIT 1
-          )
+          ),
+          c.last_message_preview
         ) as last_message
       FROM conversations c
       LEFT JOIN customers cu ON c.customer_id = cu.id

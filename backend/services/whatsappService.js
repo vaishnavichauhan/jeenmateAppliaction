@@ -62,10 +62,11 @@ class WhatsAppService {
     return undefined;
   }
 
-  async initialize() {
-    if (this.isInitializing) return;
+  async initialize({ autoRestore = false } = {}) {
+    if (this.isInitializing || this.client) return;
+    this.isAutoRestore = Boolean(autoRestore);
     this.isInitializing = true;
-    console.log(`[WhatsApp:Account ${this.accountId}] Initializing WhatsApp Web Client...`);
+    console.log(`[WhatsApp:Account ${this.accountId}] Initializing WhatsApp Web Client... (autoRestore=${this.isAutoRestore})`);
 
     try {
       const clientId = `account-${this.accountId}`;
@@ -137,6 +138,22 @@ class WhatsAppService {
 
     // QR Event
     this.client.on('qr', async (qr) => {
+      // If this session was initialized via auto-restore, do not treat as user QR
+      if (this.isAutoRestore) {
+        console.log(`\n[WhatsApp:Account ${this.accountId}] Auto-restore failed — session requires QR authentication.`);
+        console.log(`[WhatsApp:Account ${this.accountId}] Marked disconnected; waiting for explicit user QR request.`);
+
+        this.status = 'disconnected';
+        this.isConnected = false;
+        this.latestQrString = null;
+        this.latestQrDataUrl = null;
+        this.lastUpdated = new Date().toISOString();
+
+        const sessionManager = require('./sessionManager');
+        sessionManager.handleAutoRestoreFailed(this.accountId).catch(() => {});
+        return;
+      }
+
       console.log(`\n[WhatsApp:Account ${this.accountId}] QR ready — user must scan to link WhatsApp.`);
       try {
         qrcode.toString(qr, { type: 'terminal', small: true }, (err, str) => {
@@ -177,6 +194,7 @@ class WhatsAppService {
 
     // Authenticated Event
     this.client.on('authenticated', async () => {
+      this.isAutoRestore = false;
       console.log(`[WhatsApp:Account ${this.accountId}] Authenticated.`);
       this.status = 'online';
       this.isConnected = true;
@@ -508,15 +526,22 @@ class WhatsAppService {
 
     // Find or create customer in MySQL (scoped to this WhatsApp Account)
     let customerId = null;
+    const cleanPhone = String(phoneNumber).replace(/[^0-9]/g, '');
+    const phoneSuffix = cleanPhone.length >= 10 ? cleanPhone.slice(-10) : '';
+
     const [custRows] = await pool.execute(
-      'SELECT id, name FROM customers WHERE whatsapp_account_id = ? AND (phone_number = ? OR whatsapp_jid = ?) LIMIT 1',
-      [accId, phoneNumber, targetJid]
+      `SELECT id, name FROM customers WHERE (whatsapp_account_id = ? OR whatsapp_account_id IS NULL) AND (
+        phone_number = ? 
+        OR whatsapp_jid = ? 
+        OR (LENGTH(?) >= 10 AND (RIGHT(REPLACE(REPLACE(phone_number, '+', ''), '-', ''), 10) = ? OR whatsapp_jid LIKE CONCAT('%', ?, '%')))
+      ) ORDER BY (whatsapp_account_id = ?) DESC, id DESC LIMIT 1`,
+      [accId, phoneNumber, targetJid, phoneSuffix, phoneSuffix, phoneSuffix, accId]
     );
 
     if (custRows.length > 0) {
       customerId = custRows[0].id;
       if (!isBadName && (custRows[0].name === phoneNumber || custRows[0].name.toLowerCase() === 'vaishnavi')) {
-        await pool.execute('UPDATE customers SET name = ? WHERE id = ?', [contactName, customerId]);
+        await pool.execute('UPDATE customers SET name = ?, whatsapp_account_id = COALESCE(?, whatsapp_account_id) WHERE id = ?', [contactName, accId, customerId]);
       }
     } else {
       const initialName = !isBadName ? contactName : phoneNumber;
@@ -530,8 +555,12 @@ class WhatsAppService {
     // Find or create conversation in MySQL (scoped to this WhatsApp Account)
     let convId = null;
     const [convRows] = await pool.execute(
-      'SELECT id, unread_count FROM conversations WHERE customer_id = ? AND whatsapp_account_id = ? LIMIT 1',
-      [customerId, accId]
+      `SELECT c.id, c.unread_count FROM conversations c 
+       JOIN customers cu ON c.customer_id = cu.id
+       WHERE (c.customer_id = ? OR cu.phone_number = ? OR cu.whatsapp_jid = ? OR (LENGTH(?) >= 10 AND RIGHT(REPLACE(REPLACE(cu.phone_number, '+', ''), '-', ''), 10) = ?))
+         AND (c.whatsapp_account_id = ? OR c.whatsapp_account_id IS NULL)
+       ORDER BY (c.whatsapp_account_id = ?) DESC, c.id DESC LIMIT 1`,
+      [customerId, phoneNumber, targetJid, phoneSuffix, phoneSuffix, accId, accId]
     );
 
     const msgTime = (msg.timestamp && typeof msg.timestamp === 'number') ? msg.timestamp * 1000 : Date.now();
@@ -541,8 +570,8 @@ class WhatsAppService {
     if (convRows.length > 0) {
       convId = convRows[0].id;
       await pool.execute(
-        'UPDATE conversations SET unread_count = unread_count + ?, last_message_at = ? WHERE id = ?',
-        [unreadIncrement, utcStr, convId]
+        'UPDATE conversations SET unread_count = unread_count + ?, last_message_at = ?, whatsapp_account_id = COALESCE(?, whatsapp_account_id), customer_id = ? WHERE id = ?',
+        [unreadIncrement, utcStr, accId, customerId, convId]
       );
     } else {
       const [insertConv] = await pool.execute(
@@ -563,7 +592,19 @@ class WhatsAppService {
     const isMediaMsg = isImageMsg || isVideoMsg || isDocMsg || !!msg.hasMedia;
 
     let initialMetadata = null;
-    if (isImageMsg) {
+    if (isCallLog) {
+      const callTypeVal = isMissedCall ? 'missed' : (fromMe ? 'outgoing' : 'incoming');
+      const mediaTypeVal = isVideoCall ? 'video' : 'voice';
+      initialMetadata = {
+        isCall: true,
+        callType: callTypeVal,
+        mediaType: mediaTypeVal,
+        duration: null,
+        isVideo: isVideoCall,
+        isMissed: isMissedCall,
+        whatsappCallId: safeMsgId
+      };
+    } else if (isImageMsg) {
       const rawB64 = (msg._data && msg._data.body && String(msg._data.body).startsWith('/9j/'))
         ? msg._data.body
         : (safeText && safeText.startsWith('/9j/') ? safeText : null);
@@ -644,7 +685,7 @@ class WhatsAppService {
       return;
     }
 
-    const msgTypeToSave = isImageMsg ? 'image' : (isVideoMsg ? 'video' : (isDocMsg ? 'document' : (mType === 'audio' || mType === 'ptt' ? 'audio' : 'text')));
+    const msgTypeToSave = isCallLog ? 'call' : (isImageMsg ? 'image' : (isVideoMsg ? 'video' : (isDocMsg ? 'document' : (mType === 'audio' || mType === 'ptt' ? 'audio' : 'text'))));
     const metadataJson = initialMetadata ? JSON.stringify(initialMetadata) : null;
 
     const [insertMsg] = await pool.execute(
@@ -652,6 +693,36 @@ class WhatsAppService {
        VALUES (?, ?, ?, ?, ?, ?, ?, 'delivered', ?, ?, ?, ?)`,
       [convId, customerId, direction, safeText, safeMsgId, msgTypeToSave, msgTime, utcStr, userId, accId, metadataJson]
     );
+
+    if (isCallLog) {
+      try {
+        const botPhoneVal = this.botPhone || (this.account && this.account.phone_number ? this.account.phone_number : null);
+        const callIdVal = safeMsgId || `msg_call_${Math.floor(msgTime / 1000)}_${Date.now()}`;
+        const rawCallJson = JSON.stringify({
+          id: callIdVal,
+          from: targetJid,
+          timestamp: Math.floor(msgTime / 1000),
+          isGroup: false,
+          isVideo: isVideoCall,
+          isVideoCall: isVideoCall,
+          fromMe: fromMe,
+          status: isMissedCall ? 'missed' : 'unknown'
+        });
+        await pool.execute(
+          `INSERT INTO whatsapp_calls (call_id, phone_number, customer_name, call_type, media_type, duration, raw_call, created_at, user_id, account_phone, whatsapp_account_id)
+           VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)
+           ON DUPLICATE KEY UPDATE
+             customer_name = VALUES(customer_name),
+             call_type = VALUES(call_type),
+             media_type = VALUES(media_type),
+             whatsapp_account_id = VALUES(whatsapp_account_id),
+             account_phone = COALESCE(VALUES(account_phone), whatsapp_calls.account_phone)`,
+          [callIdVal, phoneNumber, contactName, isMissedCall ? 'missed' : (fromMe ? 'outgoing' : 'incoming'), isVideoCall ? 'video' : 'voice', rawCallJson, utcStr, userId, botPhoneVal, accId]
+        );
+      } catch (callErr) {
+        console.warn(`[WhatsApp:Account ${accId}] Error inserting live call:`, callErr.message);
+      }
+    }
 
     const savedMsg = await Message.findById(insertMsg.insertId);
     const updatedConv = await Conversation.findById(convId);
@@ -1193,12 +1264,19 @@ class WhatsAppService {
       const messages = await this.client.pupPage.evaluate(async ({ targetJid, maxMsgs, phoneNumber }) => {
         try {
           const searchJids = [];
-          if (phoneNumber) {
-            const cleanPhone = String(phoneNumber).replace(/[^0-9]/g, '');
-            if (cleanPhone) searchJids.push(`${cleanPhone}@c.us`);
-          }
           if (targetJid && !searchJids.includes(targetJid)) {
             searchJids.push(targetJid);
+          }
+          if (phoneNumber) {
+            const isGroup = String(phoneNumber).startsWith('group-') || String(phoneNumber).includes('@g.us');
+            const cleanPhone = String(phoneNumber).replace(/[^0-9]/g, '');
+            if (cleanPhone) {
+              const jidSuffix = isGroup ? '@g.us' : '@c.us';
+              const constructedJid = `${cleanPhone}${jidSuffix}`;
+              if (!searchJids.includes(constructedJid)) {
+                searchJids.push(constructedJid);
+              }
+            }
           }
 
           let chat = null;
@@ -1669,30 +1747,31 @@ class WhatsAppService {
 
         // Build the most reliable lookup: JID first, then phone, then suffix match
         let byJid;
+        const cleanPhone = String(phone).replace(/[^0-9]/g, '');
+        const phoneSuffix = cleanPhone.length >= 10 ? cleanPhone.slice(-10) : '';
+
         if (isGroupChat) {
           // For groups: match by exact phone (group-xxx) or JID
           [byJid] = await pool.execute(
-            'SELECT id, phone_number, name FROM customers WHERE whatsapp_account_id = ? AND (whatsapp_jid = ? OR phone_number = ?) LIMIT 1',
-            [accId, jid, phone]
+            'SELECT id, phone_number, name FROM customers WHERE (whatsapp_account_id = ? OR whatsapp_account_id IS NULL) AND (whatsapp_jid = ? OR phone_number = ?) ORDER BY (whatsapp_account_id = ?) DESC, id DESC LIMIT 1',
+            [accId, jid, phone, accId]
           );
         } else {
           // For individual chats: match by JID, exact phone, or 10-digit suffix
-          const cleanPhone = String(phone).replace(/[^0-9]/g, '');
-          const phoneSuffix = cleanPhone.length >= 10 ? cleanPhone.slice(-10) : '';
-
           if (phoneSuffix) {
             [byJid] = await pool.execute(
-              `SELECT id, phone_number, name FROM customers WHERE whatsapp_account_id = ? AND (
+              `SELECT id, phone_number, name FROM customers WHERE (whatsapp_account_id = ? OR whatsapp_account_id IS NULL) AND (
                 whatsapp_jid = ? 
                 OR phone_number = ? 
                 OR RIGHT(REPLACE(REPLACE(phone_number, '+', ''), '-', ''), 10) = ?
-              ) LIMIT 1`,
-              [accId, jid, phone, phoneSuffix]
+                OR whatsapp_jid LIKE CONCAT('%', ?, '%')
+              ) ORDER BY (whatsapp_account_id = ?) DESC, id DESC LIMIT 1`,
+              [accId, jid, phone, phoneSuffix, phoneSuffix, accId]
             );
           } else {
             [byJid] = await pool.execute(
-              'SELECT id, phone_number, name FROM customers WHERE whatsapp_account_id = ? AND (whatsapp_jid = ? OR phone_number = ?) LIMIT 1',
-              [accId, jid, phone]
+              'SELECT id, phone_number, name FROM customers WHERE (whatsapp_account_id = ? OR whatsapp_account_id IS NULL) AND (whatsapp_jid = ? OR phone_number = ?) ORDER BY (whatsapp_account_id = ?) DESC, id DESC LIMIT 1',
+              [accId, jid, phone, accId]
             );
           }
         }
@@ -1701,9 +1780,9 @@ class WhatsAppService {
           customerId = byJid[0].id;
           try {
             if (name && name !== 'Contact' && !name.startsWith('+')) {
-              await pool.execute('UPDATE customers SET name = ?, whatsapp_jid = ? WHERE id = ?', [name, jid, customerId]);
+              await pool.execute('UPDATE customers SET name = ?, whatsapp_jid = ?, whatsapp_account_id = COALESCE(?, whatsapp_account_id) WHERE id = ?', [name, jid, accId, customerId]);
             } else {
-              await pool.execute('UPDATE customers SET whatsapp_jid = ? WHERE id = ?', [jid, customerId]);
+              await pool.execute('UPDATE customers SET whatsapp_jid = ?, whatsapp_account_id = COALESCE(?, whatsapp_account_id) WHERE id = ?', [jid, accId, customerId]);
             }
           } catch (_) { }
         } else {
@@ -1715,12 +1794,12 @@ class WhatsAppService {
             customerId = insCust.insertId;
           } catch (dupErr) {
             const [fallback] = await pool.execute(
-              'SELECT id FROM customers WHERE whatsapp_account_id = ? AND (whatsapp_jid = ? OR phone_number = ?) LIMIT 1',
-              [accId, jid, phone]
+              'SELECT id FROM customers WHERE (whatsapp_account_id = ? OR whatsapp_account_id IS NULL) AND (whatsapp_jid = ? OR phone_number = ?) ORDER BY (whatsapp_account_id = ?) DESC, id DESC LIMIT 1',
+              [accId, jid, phone, accId]
             );
             if (fallback.length > 0) {
               customerId = fallback[0].id;
-              await pool.execute('UPDATE customers SET name = ? WHERE id = ?', [name, customerId]);
+              await pool.execute('UPDATE customers SET name = ?, whatsapp_account_id = COALESCE(?, whatsapp_account_id) WHERE id = ?', [name, accId, customerId]);
             }
           }
         }
@@ -1729,8 +1808,12 @@ class WhatsAppService {
         // 2. Upsert Conversation (scoped to this WhatsApp Account)
         let convId;
         const [existingConv] = await pool.execute(
-          'SELECT id FROM conversations WHERE customer_id = ? AND whatsapp_account_id = ? LIMIT 1',
-          [customerId, accId]
+          `SELECT c.id FROM conversations c
+           JOIN customers cu ON c.customer_id = cu.id
+           WHERE (c.customer_id = ? OR cu.phone_number = ? OR cu.whatsapp_jid = ? OR (LENGTH(?) >= 10 AND RIGHT(REPLACE(REPLACE(cu.phone_number, '+', ''), '-', ''), 10) = ?))
+             AND (c.whatsapp_account_id = ? OR c.whatsapp_account_id IS NULL)
+           ORDER BY (c.whatsapp_account_id = ?) DESC, c.id DESC LIMIT 1`,
+          [customerId, phone, jid, phoneSuffix, phoneSuffix, accId, accId]
         );
 
         const isPinned = chat.pinned ? 1 : 0;
@@ -1742,8 +1825,8 @@ class WhatsAppService {
         if (existingConv.length > 0) {
           convId = existingConv[0].id;
           await pool.execute(
-            'UPDATE conversations SET last_message_at = ?, unread_count = ?, is_pinned = ?, last_message_preview = COALESCE(?, last_message_preview) WHERE id = ?',
-            [isoDate, unread, isPinned, previewText, convId]
+            'UPDATE conversations SET last_message_at = ?, unread_count = ?, is_pinned = ?, last_message_preview = COALESCE(?, last_message_preview), whatsapp_account_id = COALESCE(?, whatsapp_account_id), customer_id = ? WHERE id = ?',
+            [isoDate, unread, isPinned, previewText, accId, customerId, convId]
           );
         } else {
           const [insConv] = await pool.execute(
@@ -1878,27 +1961,29 @@ class WhatsAppService {
 
       const isGroupChat = chat.isGroup || jid.includes('@g.us');
       let byJid = [];
+      const cleanPhone = String(phone).replace(/[^0-9]/g, '');
+      const phoneSuffix = cleanPhone.length >= 10 ? cleanPhone.slice(-10) : '';
+
       if (isGroupChat) {
         [byJid] = await pool.execute(
-          'SELECT id, phone_number, name FROM customers WHERE whatsapp_account_id = ? AND (whatsapp_jid = ? OR phone_number = ?) LIMIT 1',
-          [this.accountId, jid, phone]
+          'SELECT id, phone_number, name FROM customers WHERE (whatsapp_account_id = ? OR whatsapp_account_id IS NULL) AND (whatsapp_jid = ? OR phone_number = ?) ORDER BY (whatsapp_account_id = ?) DESC, id DESC LIMIT 1',
+          [this.accountId, jid, phone, this.accountId]
         );
       } else {
-        const cleanPhone = String(phone).replace(/[^0-9]/g, '');
-        const phoneSuffix = cleanPhone.length >= 10 ? cleanPhone.slice(-10) : '';
         if (phoneSuffix) {
           [byJid] = await pool.execute(
-            `SELECT id, phone_number, name FROM customers WHERE whatsapp_account_id = ? AND (
+            `SELECT id, phone_number, name FROM customers WHERE (whatsapp_account_id = ? OR whatsapp_account_id IS NULL) AND (
               whatsapp_jid = ? 
               OR phone_number = ? 
               OR RIGHT(REPLACE(REPLACE(phone_number, '+', ''), '-', ''), 10) = ?
-            ) LIMIT 1`,
-            [this.accountId, jid, phone, phoneSuffix]
+              OR whatsapp_jid LIKE CONCAT('%', ?, '%')
+            ) ORDER BY (whatsapp_account_id = ?) DESC, id DESC LIMIT 1`,
+            [this.accountId, jid, phone, phoneSuffix, phoneSuffix, this.accountId]
           );
         } else {
           [byJid] = await pool.execute(
-            'SELECT id, phone_number, name FROM customers WHERE whatsapp_account_id = ? AND (whatsapp_jid = ? OR phone_number = ?) LIMIT 1',
-            [this.accountId, jid, phone]
+            'SELECT id, phone_number, name FROM customers WHERE (whatsapp_account_id = ? OR whatsapp_account_id IS NULL) AND (whatsapp_jid = ? OR phone_number = ?) ORDER BY (whatsapp_account_id = ?) DESC, id DESC LIMIT 1',
+            [this.accountId, jid, phone, this.accountId]
           );
         }
       }
@@ -1908,8 +1993,12 @@ class WhatsAppService {
       const custPhone = byJid[0].phone_number;
 
       const [convRows] = await pool.execute(
-        'SELECT id FROM conversations WHERE customer_id = ? AND whatsapp_account_id = ? LIMIT 1',
-        [custId, this.accountId]
+        `SELECT c.id FROM conversations c 
+         JOIN customers cu ON c.customer_id = cu.id
+         WHERE (c.customer_id = ? OR cu.phone_number = ? OR cu.whatsapp_jid = ? OR (LENGTH(?) >= 10 AND RIGHT(REPLACE(REPLACE(cu.phone_number, '+', ''), '-', ''), 10) = ?))
+           AND (c.whatsapp_account_id = ? OR c.whatsapp_account_id IS NULL)
+         ORDER BY (c.whatsapp_account_id = ?) DESC, c.id DESC LIMIT 1`,
+        [custId, custPhone, jid, phoneSuffix, phoneSuffix, this.accountId, this.accountId]
       );
       if (convRows.length === 0) return;
       const convId = convRows[0].id;
@@ -1951,6 +2040,27 @@ class WhatsAppService {
                WHERE id = ?`,
               [m.body || '', safeType, waMs, m.status || 'delivered', iso, metadataJson, exist[0].id]
             );
+          }
+
+          if (isCall && safeMsgId) {
+            try {
+              const botPhoneVal = this.botPhone || (this.account && this.account.phone_number ? this.account.phone_number : null);
+              const isMissed = (m.body && m.body.toLowerCase().includes('missed')) || (m.metadata && m.metadata.callType === 'missed');
+              const isVid = (m.body && m.body.toLowerCase().includes('video')) || (m.metadata && m.metadata.mediaType === 'video');
+              const cType = isMissed ? 'missed' : (dir === 'outgoing' ? 'outgoing' : 'incoming');
+              const mType = isVid ? 'video' : 'voice';
+              await pool.execute(
+                `INSERT INTO whatsapp_calls (call_id, phone_number, customer_name, call_type, media_type, duration, raw_call, created_at, user_id, account_phone, whatsapp_account_id)
+                 VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)
+                 ON DUPLICATE KEY UPDATE
+                   customer_name = VALUES(customer_name),
+                   call_type = VALUES(call_type),
+                   media_type = VALUES(media_type),
+                   whatsapp_account_id = VALUES(whatsapp_account_id),
+                   account_phone = COALESCE(VALUES(account_phone), whatsapp_calls.account_phone)`,
+                [safeMsgId, custPhone, byJid[0].name || custPhone, cType, mType, metadataJson, iso, this.userId, botPhoneVal, this.accountId]
+              );
+            } catch (_) { }
           }
         }
         if (inserted > 0) {
@@ -2354,21 +2464,29 @@ class WhatsAppService {
 
       try {
         await pool.execute(
-          `INSERT INTO whatsapp_calls (call_id, phone_number, customer_name, call_type, media_type, duration, user_id, whatsapp_account_id, created_at, raw_call)
+          `INSERT INTO whatsapp_calls (call_id, phone_number, customer_name, call_type, media_type, duration, user_id, whatsapp_account_id, account_phone, created_at, raw_call)
            SELECT 
              COALESCE(JSON_UNQUOTE(JSON_EXTRACT(m.metadata, '$.whatsappCallId')), m.whatsapp_message_id, CONCAT('msg_call_', m.id)) as call_id,
              COALESCE(cu.phone_number, '') as phone_number,
              COALESCE(cu.name, 'Customer') as customer_name,
-             COALESCE(JSON_UNQUOTE(JSON_EXTRACT(m.metadata, '$.callType')), 'incoming') as call_type,
-             COALESCE(JSON_UNQUOTE(JSON_EXTRACT(m.metadata, '$.mediaType')), 'voice') as media_type,
+             CASE
+               WHEN m.message LIKE '%missed%' OR JSON_UNQUOTE(JSON_EXTRACT(m.metadata, '$.callType')) = 'missed' THEN 'missed'
+               WHEN m.direction = 'outgoing' OR JSON_UNQUOTE(JSON_EXTRACT(m.metadata, '$.callType')) = 'outgoing' THEN 'outgoing'
+               ELSE 'incoming'
+             END as call_type,
+             CASE
+               WHEN m.message LIKE '%video%' OR JSON_UNQUOTE(JSON_EXTRACT(m.metadata, '$.mediaType')) = 'video' THEN 'video'
+               ELSE 'voice'
+             END as media_type,
              JSON_UNQUOTE(JSON_EXTRACT(m.metadata, '$.duration')) as duration,
              m.user_id,
-             m.whatsapp_account_id,
+             ?,
+             ?,
              m.created_at,
-             m.metadata as raw_call
+             COALESCE(m.metadata, JSON_OBJECT('isCall', true, 'timestamp', UNIX_TIMESTAMP(m.created_at))) as raw_call
            FROM messages m
            LEFT JOIN customers cu ON m.customer_id = cu.id
-           WHERE m.whatsapp_account_id = ? AND (
+           WHERE (m.whatsapp_account_id = ? OR (? IS NOT NULL AND m.whatsapp_account_id IN (SELECT id FROM whatsapp_accounts WHERE REPLACE(REPLACE(phone_number, '+', ''), ' ', '') = ?))) AND (
              m.message_type = 'call' 
              OR JSON_EXTRACT(m.metadata, '$.isCall') = true
              OR m.message LIKE '%video call%'
@@ -2376,11 +2494,13 @@ class WhatsAppService {
              OR m.message LIKE '%missed call%'
            )
            ON DUPLICATE KEY UPDATE
+             whatsapp_account_id = VALUES(whatsapp_account_id),
+             account_phone = COALESCE(VALUES(account_phone), whatsapp_calls.account_phone),
              customer_name = VALUES(customer_name),
              call_type = VALUES(call_type),
              media_type = VALUES(media_type),
              duration = COALESCE(VALUES(duration), whatsapp_calls.duration)`,
-          [this.accountId]
+          [this.accountId, phoneForQuery, this.accountId, phoneForQuery, phoneForQuery]
         );
       } catch (_) { }
 
@@ -2398,11 +2518,11 @@ class WhatsAppService {
       } catch (_) { }
 
       const queryParams = phoneForQuery
-        ? [this.accountId, phoneForQuery]
+        ? [this.accountId, phoneForQuery, phoneForQuery]
         : [this.accountId];
 
       const whereClause = phoneForQuery
-        ? 'WHERE (wc.whatsapp_account_id = ? OR (wc.account_phone IS NOT NULL AND REPLACE(REPLACE(wc.account_phone, "+", ""), " ", "") = ?)) AND wc.phone_number NOT LIKE "group-%" AND wc.phone_number NOT LIKE "%@g.us" AND wc.phone_number NOT LIKE "%@newsletter"'
+        ? 'WHERE (wc.whatsapp_account_id = ? OR (wc.account_phone IS NOT NULL AND REPLACE(REPLACE(wc.account_phone, "+", ""), " ", "") = ?) OR (wc.whatsapp_account_id IN (SELECT id FROM whatsapp_accounts WHERE REPLACE(REPLACE(phone_number, "+", ""), " ", "") = ?))) AND wc.phone_number NOT LIKE "group-%" AND wc.phone_number NOT LIKE "%@g.us" AND wc.phone_number NOT LIKE "%@newsletter"'
         : 'WHERE wc.whatsapp_account_id = ? AND wc.phone_number NOT LIKE "group-%" AND wc.phone_number NOT LIKE "%@g.us" AND wc.phone_number NOT LIKE "%@newsletter"';
 
       const [rows] = await pool.execute(

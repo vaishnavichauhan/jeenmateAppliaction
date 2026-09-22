@@ -18,6 +18,7 @@ router.post('/accounts/:id/members', whatsappController.updateAccountMembers);
 // --- Scoped WhatsApp Account Session Routes ---
 router.get('/accounts/:id/status', whatsappController.getAccountStatus);
 router.get('/accounts/:id/qr', whatsappController.getAccountQr);
+router.get('/accounts/:id/qr-viewer', whatsappController.getAccountQrViewer);
 router.post('/accounts/:id/restart', whatsappController.restartAccountSession);
 router.post('/accounts/:id/sync', whatsappController.syncAccountChats);
 router.get('/accounts/:id/call-logs', whatsappController.getAccountCallLogs);

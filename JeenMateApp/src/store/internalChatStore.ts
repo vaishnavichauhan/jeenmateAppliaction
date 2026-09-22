@@ -145,7 +145,7 @@ export const useInternalChatStore = create<InternalChatState>((set, get) => ({
         });
 
         const { token, serverUrl } = useAuthStore.getState();
-        const base = (serverUrl || (Platform.OS === 'android' ? 'http://192.168.1.3:5001' : 'http://localhost:5001')).replace(/\/+$/, '');
+        const base = (serverUrl || (Platform.OS === 'android' ? 'http://10.0.2.2:5001' : 'http://localhost:5001')).replace(/\/+$/, '');
         const targetEndpoint = `${base}/api/internal-chat/messages`;
 
         console.log('[InternalChatStore] Sending media to:', targetEndpoint, 'count:', mediaFiles.length);

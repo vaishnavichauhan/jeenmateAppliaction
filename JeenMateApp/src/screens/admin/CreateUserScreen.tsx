@@ -101,7 +101,7 @@ export const CreateUserScreen: React.FC<{ navigation: any }> = ({ navigation }) 
                 <Icon name="user" size={16} color={COLORS.textMuted} />
                 <TextInput
                   style={styles.input}
-                  placeholder="e.g. Priya Sharma"
+                  placeholder="Enter Full Name"
                   placeholderTextColor={COLORS.textSubtle}
                   value={name}
                   onChangeText={(v) => { setName(v); setErrors((e) => ({ ...e, name: '' })); }}
@@ -118,7 +118,7 @@ export const CreateUserScreen: React.FC<{ navigation: any }> = ({ navigation }) 
                 <Icon name="mail" size={16} color={COLORS.textMuted} />
                 <TextInput
                   style={styles.input}
-                  placeholder="e.g. priya@company.com"
+                  placeholder="Enter Email ID"
                   placeholderTextColor={COLORS.textSubtle}
                   value={email}
                   onChangeText={(v) => { setEmail(v); setErrors((e) => ({ ...e, email: '' })); }}
@@ -146,7 +146,7 @@ export const CreateUserScreen: React.FC<{ navigation: any }> = ({ navigation }) 
                   autoCorrect={false}
                 />
                 <TouchableOpacity onPress={() => setShowPassword((s) => !s)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-                  <Icon name={showPassword ? 'eye-off' : 'eye'} size={16} color={COLORS.textMuted} />
+                  <Icon name={showPassword ? 'eye' : 'eye-off'} size={16} color={COLORS.textMuted} />
                 </TouchableOpacity>
               </View>
               {errors.password ? <Text style={styles.errorText}>{errors.password}</Text> : null}
@@ -174,11 +174,6 @@ export const CreateUserScreen: React.FC<{ navigation: any }> = ({ navigation }) 
                   </TouchableOpacity>
                 ))}
               </View>
-              <Text style={styles.roleHint}>
-                {role === 'admin'
-                  ? '⚡ Admin can create users and access all features.'
-                  : '👤 User can access app features but cannot create users.'}
-              </Text>
             </View>
           </View>
 
@@ -192,10 +187,7 @@ export const CreateUserScreen: React.FC<{ navigation: any }> = ({ navigation }) 
             {isLoading ? (
               <ActivityIndicator size="small" color={COLORS.bgWhite} />
             ) : (
-              <>
-                <Icon name="user-plus" size={18} color={COLORS.bgWhite} strokeWidth={2.5} />
-                <Text style={styles.submitBtnText}>Create User</Text>
-              </>
+              <Text style={styles.submitBtnText}>Create User</Text>
             )}
           </TouchableOpacity>
         </ScrollView>

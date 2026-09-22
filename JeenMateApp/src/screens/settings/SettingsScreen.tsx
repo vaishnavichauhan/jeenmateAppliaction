@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   View,
   Text,
@@ -10,7 +10,7 @@ import {
   TextInput,
   ActivityIndicator,
 } from 'react-native';
-import { useNavigation } from '@react-navigation/native';
+import { useNavigation, useFocusEffect } from '@react-navigation/native';
 import { useAuthStore } from '../../store/authStore';
 import { useWhatsAppStore } from '../../store/whatsappStore';
 import { useTaskStore } from '../../store/taskStore';
@@ -23,10 +23,10 @@ export const SettingsScreen: React.FC = () => {
   const { user, logout, createUser } = useAuthStore();
   const { accounts, fetchAccounts } = useWhatsAppStore();
   const personalConnected = React.useMemo(() => accounts.filter(
-    (a) => a.account_type === 'PERSONAL' && (a.status === 'online' || a.is_connected || a.phone_number)
+    (a) => a.account_type === 'PERSONAL' && (a.status === 'online' || a.is_connected)
   ), [accounts]);
   const teamConnected = React.useMemo(() => accounts.filter(
-    (a) => a.account_type === 'TEAM' && (a.status === 'online' || a.is_connected || a.phone_number)
+    (a) => a.account_type === 'TEAM' && (a.status === 'online' || a.is_connected)
   ), [accounts]);
   const totalConnectedCount = personalConnected.length + teamConnected.length;
   const { teamMembers, fetchTeamMembers } = useTaskStore();
@@ -43,10 +43,12 @@ export const SettingsScreen: React.FC = () => {
   const [newRole, setNewRole] = useState<'user' | 'admin'>('user');
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  useEffect(() => {
-    fetchTeamMembers();
-    fetchAccounts();
-  }, []);
+  useFocusEffect(
+    useCallback(() => {
+      fetchTeamMembers();
+      fetchAccounts();
+    }, [])
+  );
 
   const handleLogout = () => {
     Alert.alert(

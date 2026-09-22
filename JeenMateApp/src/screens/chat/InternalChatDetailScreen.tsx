@@ -20,7 +20,7 @@ import {
 } from 'react-native';
 import { useRoute, useNavigation } from '@react-navigation/native';
 import { launchImageLibrary, launchCamera } from 'react-native-image-picker';
-import DocumentPicker, { types as docTypes } from 'react-native-document-picker';
+import { pick, types as docTypes, isErrorWithCode, errorCodes, keepLocalCopy } from '@react-native-documents/picker';
 import { useInternalChatStore, InternalChatMessage, SelectedMedia, SelectedImage } from '../../store/internalChatStore';
 import { useAuthStore } from '../../store/authStore';
 import { useTaskStore, TeamMember } from '../../store/taskStore';
@@ -477,7 +477,7 @@ export const InternalChatDetailScreen: React.FC = () => {
     setAttachmentModalVisible(false);
 
     try {
-      const res = await DocumentPicker.pickSingle({
+      const [res] = await pick({
         type: [
           docTypes.pdf,
           docTypes.doc,
@@ -487,11 +487,22 @@ export const InternalChatDetailScreen: React.FC = () => {
           'application/msword',
           'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
         ],
-        copyTo: 'cachesDirectory',
       });
 
       if (res) {
-        const fileUri = res.fileCopyUri || res.uri;
+        let fileUri = res.uri;
+        try {
+          const [localCopy] = await keepLocalCopy({
+            files: [{ uri: res.uri, fileName: res.name ?? `doc_${Date.now()}.pdf` }],
+            destination: 'cachesDirectory',
+          });
+          if (localCopy?.status === 'success' && localCopy.localUri) {
+            fileUri = localCopy.localUri;
+          }
+        } catch (copyErr) {
+          console.warn('[DocumentPicker] keepLocalCopy error:', copyErr);
+        }
+
         const newDoc: SelectedMedia = {
           uri: fileUri,
           fileName: res.name || `doc_${Date.now()}.pdf`,
@@ -503,7 +514,7 @@ export const InternalChatDetailScreen: React.FC = () => {
         setSelectedImages([newDoc]);
       }
     } catch (err: any) {
-      if (DocumentPicker.isCancel(err)) {
+      if (isErrorWithCode(err) && err.code === errorCodes.OPERATION_CANCELED) {
         return;
       }
       console.warn('[Document] Error:', err);
@@ -556,7 +567,7 @@ export const InternalChatDetailScreen: React.FC = () => {
     if (path.startsWith('http://') || path.startsWith('https://') || path.startsWith('file://')) {
       return path;
     }
-    const defaultHost = Platform.OS === 'android' ? 'http://192.168.1.3:5001' : 'http://localhost:5001';
+    const defaultHost = Platform.OS === 'android' ? 'http://10.0.2.2:5001' : 'http://localhost:5001';
     const cleanServer = (serverUrl || defaultHost).replace(/\/+$/, '');
     const cleanPath = path.startsWith('/') ? path : `/${path}`;
     return `${cleanServer}${cleanPath}`;
